@@ -1,9 +1,13 @@
 import type {catalogSearch} from './scryfall';
+import {validateScryfallParentheses} from '../shared/filters';
+import {ScryfallError} from './scryfall-client';
 export type CatalogMatcher=(query:string,ids:string[])=>Promise<Set<string>>;
 export function catalogMatcher(search:ReturnType<typeof catalogSearch>):CatalogMatcher{
  const cache=new Map<string,{expires:number;result:Promise<Set<string>>}>();
  return async(query,ids)=>{
   const scope=[...new Set(ids)].sort();if(!query)return new Set(scope);
+  const syntaxError=validateScryfallParentheses(query);
+  if(syntaxError)throw new ScryfallError(`Recherche avancée invalide : ${syntaxError}`,400);
   const key=JSON.stringify([query,scope]),cached=cache.get(key);
   if(cached&&cached.expires>Date.now())return cached.result;
   const result=(async()=>{

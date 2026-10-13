@@ -1,15 +1,45 @@
 import {normalizeName,displayName} from './card-name';
-export type LocalFilters={name:string;type:string;set:string;section:string;foil:string;min:string;max:string;oracle:string;priceMin:string;priceMax:string;priceStatus:string};
-export const emptyFilters:LocalFilters={name:'',type:'',set:'',section:'',foil:'',min:'',max:'',oracle:'',priceMin:'',priceMax:'',priceStatus:''};
+export type LocalFilters={name:string;type:string;colors:string;mana:string;white:string;blue:string;black:string;red:string;green:string;set:string;section:string;foil:string;min:string;max:string;oracle:string;priceMin:string;priceMax:string;priceStatus:string};
+export const emptyFilters:LocalFilters={name:'',type:'',colors:'',mana:'',white:'',blue:'',black:'',red:'',green:'',set:'',section:'',foil:'',min:'',max:'',oracle:'',priceMin:'',priceMax:'',priceStatus:''};
+/** Validate Scryfall syntax delimiters without interpreting the query language. */
+export function validateScryfallParentheses(query:string):string|null {
+ let depth=0,quoted=false,escaped=false,lastOpen=-1;
+ for(let index=0;index<query.length;index++){
+  const char=query[index];
+  if(escaped){escaped=false;continue;}
+  if(char==='\\'){escaped=true;continue;}
+  if(char==='"'){quoted=!quoted;continue;}
+  if(quoted)continue;
+  if(char==='('){depth++;lastOpen=index;}
+  if(char===')'){
+   if(depth===0)return 'Parenthèse fermante sans ouverture.';
+   if(query.slice(lastOpen+1,index).trim()==='')return 'Groupe de parenthèses vide.';
+   depth--;
+  }
+ }
+ if(quoted)return 'Guillemet non fermé dans la recherche.';
+ if(depth!==0)return 'Parenthèses non équilibrées dans la recherche.';
+ return null;
+}
 export function matchesFilters(card:any,filters:LocalFilters):boolean {
  const quantity=Number(card.quantity??card.exchange_quantity??0);
+ const colors=Array.isArray(card.colors)?card.colors.join(''):String(card.colors??'');
+ const required=card.color_mana??manaRequirements(String(card.mana_cost??''));
  return normalizeName(displayName(card)+' '+card.name).includes(normalizeName(filters.name))
   && normalizeName(card.type_line??'').includes(normalizeName(filters.type))
+  && (!filters.colors||colors.toUpperCase().split('').sort().join('')===filters.colors.toUpperCase().replace(/[^WUBRG]/g,'').split('').sort().join(''))
+  && (!filters.mana||normalizeName(card.mana_cost??'').includes(normalizeName(filters.mana)))
+  && (['white','blue','black','red','green'] as const).every((key,index)=>!filters[key]||Number(required[index]??0)>=Number(filters[key]))
   && (!filters.set||normalizeName(card.set_code??'')===normalizeName(filters.set))
   && (!filters.section||card.section===filters.section)
   && (!filters.foil||(card.foil!=null && Boolean(card.foil)===(filters.foil==='1')))
   && (!filters.min||quantity>=Number(filters.min)) && (!filters.max||quantity<=Number(filters.max))
   && (!filters.oracle||card.oracle_id===filters.oracle.trim()) && matchesPriceFilters(card,filters);
+}
+export function manaRequirements(cost:string):number[]{
+ const counts=[0,0,0,0,0];const indexes:Record<string,number>={W:0,U:1,B:2,R:3,G:4};
+ for(const symbol of cost.matchAll(/\{([^}]+)\}/g))for(const color of symbol[1].toUpperCase())if(indexes[color]!==undefined)counts[indexes[color]]++;
+ return counts;
 }
 export function buildCatalogQuery(values:Record<string,string>):string {
  const quote=(value:string)=>'"'+value.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"';

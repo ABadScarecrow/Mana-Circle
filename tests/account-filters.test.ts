@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import request from 'supertest';
 import {openDatabase} from '../src/server/db';
 import {createApp} from '../src/server/app';
-import {buildCatalogQuery,emptyFilters,matchesFilters} from '../src/shared/filters';
+import {buildCatalogQuery,emptyFilters,matchesFilters,validateScryfallParentheses,manaRequirements} from '../src/shared/filters';
 test('filters combine identity criteria, accents, quantities and full query syntax',()=>{
  const card={name:'Lightning Bolt',fr_name:'Foudre',oracle_id:'bolt',quantity:3,type_line:'Instant',set_code:'M10',section:'sideboard',foil:1};
  assert.ok(matchesFilters(card,{...emptyFilters,name:'FOUDRE',set:'m10',foil:'1',min:'2',type:'instant'}));
@@ -13,6 +13,22 @@ test('filters combine identity criteria, accents, quantities and full query synt
  const query=buildCatalogQuery({type:'Dragon',mv:'<=5',rarity:'rare',priceMin:'2',dateMin:'2020-01-01',finish:'foil',advanced:'is:legendary or keyword:flying'});
  assert.match(query,/type:"Dragon"/);assert.match(query,/mv<=5/);assert.match(query,/eur>=2/);assert.match(query,/date>=2020-01-01/);assert.match(query,/is:foil/);assert.match(query,/\(is:legendary or keyword:flying\)/);
  assert.equal(buildCatalogQuery({}), '');assert.equal(buildCatalogQuery({name:'A "Quoted" Name'}),'name:"A \\"Quoted\\" Name"');
+});
+test('parenthesis validation accepts nesting and ignores quoted parentheses',()=>{
+ assert.equal(validateScryfallParentheses('(type:creature (color:white or color:blue)) name:"Card (test)"'),null);
+ assert.equal(validateScryfallParentheses('(type:creature'),'Parenthèses non équilibrées dans la recherche.');
+ assert.equal(validateScryfallParentheses('type:creature)'),'Parenthèse fermante sans ouverture.');
+ assert.equal(validateScryfallParentheses('name:"unfinished'),'Guillemet non fermé dans la recherche.');
+ assert.equal(validateScryfallParentheses('()'),'Groupe de parenthèses vide.');
+});
+test('mana costs count colored symbols while ignoring generic and hybrid separator symbols',()=>{
+ assert.deepEqual(manaRequirements('{2}{W}{U/B}{R/P}{G}'),[1,1,1,1,1]);
+});
+test('local filters combine colors, mana cost, and colored mana requirements',()=>{
+ const card={name:'Card',type_line:'Creature',quantity:2,colors:['W','U'],mana_cost:'{2}{W}{U}'};
+ assert.equal(matchesFilters(card,{...emptyFilters,colors:'UW',mana:'{W}',white:'1',blue:'1'}),true);
+ assert.equal(matchesFilters(card,{...emptyFilters,colors:'B'}),false);
+ assert.equal(matchesFilters(card,{...emptyFilters,red:'1'}),false);
 });
 test('reset wipes only the current user, retains identity, revokes other sessions and clears objectives',async()=>{
  const db=openDatabase(':memory:');const resolve=async(name:string)=>{const card={oracle_id:name,name,image:null,type_line:'Instant'};db.prepare('INSERT OR IGNORE INTO cards VALUES (?,?,?,?)').run(name,name,null,'Instant');db.prepare('INSERT OR IGNORE INTO card_names VALUES (?,?)').run(name,name);return card;};

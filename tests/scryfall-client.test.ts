@@ -19,6 +19,11 @@ test('404 is reported as an unknown card without retrying',async()=>{
  await assert.rejects(request('/cards/named?exact=unknown'),(error:unknown)=>error instanceof ScryfallError&&error.status===404);
  assert.equal(calls,1);
 });
+test('400 preserves the upstream syntax diagnostic without retrying',async()=>{
+ let calls=0;const request=scryfallClient({fetcher:async()=>{calls++;return Response.json({object:'error',details:'Your search contains unclosed parentheses.'},{status:400});},sleep:async()=>{}});
+ await assert.rejects(request('/cards/search?q=%28type%3Acreature'),(error:unknown)=>error instanceof ScryfallError&&error.status===400&&/unclosed parentheses/.test(error.message));
+ assert.equal(calls,1);
+});
 
 test('429 honors Retry-After and succeeds on a bounded retry',async()=>{
  let calls=0;const waits:number[]=[];
@@ -41,4 +46,11 @@ test('timeouts retry with bounded backoff and malformed success bodies fail expl
  assert.equal(calls,3);assert.ok(waits.includes(500));assert.ok(waits.includes(1000));
  const malformed=scryfallClient({fetcher:async()=>new Response('<html>bad gateway</html>'),sleep:async()=>{}});
  await assert.rejects(malformed('/cards/search?q=bolt'),(error:unknown)=>error instanceof ScryfallError&&error.status===502&&/illisible/.test(error.message));
+});
+test('429 exhaustion is bounded and reports a retry delay; empty bodies are malformed',async()=>{
+ let calls=0;const request=scryfallClient({fetcher:async()=>{calls++;return new Response('{}',{status:429,headers:{'Retry-After':'1'}});},sleep:async()=>{}});
+ await assert.rejects(request('/cards/search?q=bolt'),(error:unknown)=>error instanceof ScryfallError&&error.status===429&&error.retryAfter===1);
+ assert.equal(calls,3);
+ const empty=scryfallClient({fetcher:async()=>new Response('')});
+ await assert.rejects(empty('/cards/search?q=bolt'),(error:unknown)=>error instanceof ScryfallError&&error.status===502);
 });
