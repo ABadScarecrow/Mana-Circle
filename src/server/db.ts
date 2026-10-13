@@ -1,5 +1,12 @@
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { readFileSync,mkdirSync } from 'node:fs';
+import {dirname} from 'node:path';
+import {databasePath} from './config';
+export function openConfiguredDatabase(env:NodeJS.ProcessEnv=process.env){
+ const path=databasePath(env);
+ mkdirSync(dirname(path),{recursive:true,mode:0o700});
+ return openDatabase(path);
+}
 export function openDatabase(path: string) {
  const db = new DatabaseSync(path);
  const schema=readFileSync(new URL('./schema.sql',import.meta.url),'utf8').replace(/^PRAGMA.*$/gm,'');

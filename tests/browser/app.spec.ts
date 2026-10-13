@@ -115,4 +115,15 @@ test('login and registration remain usable at every viewport',async({page})=>{
  await expect(page.getByLabel('Pseudonyme')).toBeVisible();
  await expect(page.getByLabel('Mot de passe')).toBeVisible();
  await noOverflow(page);
+ await page.getByRole('button',{name:'Déjà là ? Connecte-toi'}).click();
+ await expect(page).toHaveURL(/\/login$/);
+ await expect(page.getByRole('heading',{name:'Connexion',exact:true})).toBeVisible();
+});
+
+test('a rejected session returns to login and hides private sections',async({page})=>{
+ await fixture(page);
+ await page.route('**/api/collection',route=>route.fulfill({status:401,json:{error:'Connectez-vous pour continuer.'}}));
+ await expect(page.getByRole('heading',{name:'Connexion',exact:true})).toBeVisible({timeout:10000});
+ await expect(page).toHaveURL(/\/login$/);
+ await expect(page.getByRole('navigation',{name:'Sections principales'})).toHaveCount(0);
 });

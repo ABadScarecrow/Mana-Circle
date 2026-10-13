@@ -1,3 +1,11 @@
+import {fileURLToPath} from 'node:url';
+import {resolve} from 'node:path';
+export const PROJECT_ROOT=fileURLToPath(new URL('../../',import.meta.url));
+export function databasePath(env:NodeJS.ProcessEnv=process.env){
+ const path=env.DB_PATH??'data/mana.sqlite';
+ if(!path.trim()||path===':memory:')throw new Error('DB_PATH doit désigner un fichier SQLite persistant.');
+ return resolve(PROJECT_ROOT,path);
+}
 export function configuration(env:NodeJS.ProcessEnv=process.env){
  const production=env.NODE_ENV==='production';
  const port=Number(env.PORT??3000),host=env.HOST??'127.0.0.1';

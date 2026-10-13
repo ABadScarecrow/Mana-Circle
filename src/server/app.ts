@@ -314,7 +314,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  // Gate every document before the production static server or Vite middleware.
  app.use((req,res,next)=>{
   res.set('Cache-Control','no-store');
-  if(req.path==='/login'||/^\/(assets\/|src\/|@|node_modules\/)/.test(req.path)||req.path==='/vite.svg'){next();return;}
+  if(req.path==='/login'||req.path.startsWith('/assets/')||(!config.production&&(/^\/(src\/|@|node_modules\/)/.test(req.path)||req.path==='/vite.svg'))){next();return;}
   if(req.path==='/register'){
    if(validInvitation(db,inviteToken(req))){next();return;}
    res.status(403).type('text').send('Invitation requise. Rendez-vous sur /login.');return;

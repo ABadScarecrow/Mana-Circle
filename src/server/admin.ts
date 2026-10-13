@@ -1,11 +1,10 @@
-import {mkdirSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {backup} from 'node:sqlite';
-import {openDatabase,transaction} from './db';
+import {openConfiguredDatabase,transaction} from './db';
 import {createInvitation,revokeUser} from './access';
+import {databasePath} from './config';
 const [command,value,duration]=process.argv.slice(2);
-mkdirSync('data',{recursive:true});
-const db=openDatabase(process.env.DB_PATH??'data/mana.sqlite');
+const db=openConfiguredDatabase();
 try{
  switch(command){
   case 'invite': console.log(createInvitation(db,value??'',Number(duration??72)));break;
@@ -21,7 +20,7 @@ try{
    if(!user)throw new Error('Utilisateur introuvable.');
    transaction(db,()=>{if(command==='allow-user')db.prepare('INSERT INTO site_access VALUES (?,1) ON CONFLICT(user_id) DO UPDATE SET allowed=1').run(user.id);else revokeUser(db,String(user.id));});break;
   }
-  case 'backup':if(!value||resolve(value)===resolve(process.env.DB_PATH??'data/mana.sqlite'))throw new Error('Chemin de sauvegarde distinct requis.');await backup(db,value);console.log('Sauvegarde cohérente terminée.');break;
+  case 'backup':if(!value||resolve(value)===databasePath())throw new Error('Chemin de sauvegarde distinct requis.');await backup(db,value);console.log('Sauvegarde cohérente terminée.');break;
   default:throw new Error('Commandes : invite LIBELLE [HEURES], list, revoke-invite ID, allow-user PSEUDO, revoke-user PSEUDO, backup CHEMIN');
  }
 }finally{db.close();}

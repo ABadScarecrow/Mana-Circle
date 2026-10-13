@@ -24,7 +24,18 @@ Si la base n’existe pas encore, sa création est automatique. Elle reste hors 
 
 ### Administrer les accès depuis le terminal
 
-Toutes les commandes utilisent `DB_PATH` si défini, sinon `data/mana.sqlite`. Ne jamais utiliser une autre base par inadvertance. Il n’y a pas d’administration publique.
+Le serveur et le CLI utilisent la même fonction d’ouverture : `DB_PATH` si défini, sinon `data/mana.sqlite`. Un chemin relatif est résolu depuis la racine du dépôt, indépendamment du répertoire de lancement ; un chemin absolu est conservé. Le répertoire parent est créé si nécessaire. Un `DB_PATH` vide ou `:memory:` est refusé. Il n’y a pas d’administration publique.
+
+**Dans chaque terminal d’administration, charger la même configuration que le serveur avant toute commande** (créer et renseigner `.env` comme indiqué plus bas). Sans cela, un `DB_PATH` personnalisé exporté uniquement dans le terminal serveur ne serait pas transmis au CLI :
+
+```bash
+set -a
+source .env
+set +a
+umask 077
+```
+
+Pour un essai local sans `.env`, les deux commandes utilisent la base par défaut.
 
 ```bash
 npm run admin -- invite "Alice" 72
@@ -83,7 +94,7 @@ Les [Quick Tunnels officiels](https://developers.cloudflare.com/tunnel/get-start
 
 ### Vérifier depuis un autre réseau
 
-Sur un téléphone en données mobiles, ouvrir la nouvelle URL dans une fenêtre privée. `/` mène à la connexion ; `/register`, `/collection` et toute autre page privée doivent être refusées sans autorisation. `/api/collection` doit renvoyer 401. Sans invitation, aucun compte ne peut être créé. Donner un code à un ami, vérifier son inscription puis sa reconnexion, et vérifier que le même code ne permet pas une deuxième inscription. Révoquer son compte, puis vérifier que son navigateur connecté ne peut plus obtenir les données. Seuls la connexion et les fichiers JS/CSS sans données personnelles sont publics.
+Sur un téléphone en données mobiles, ouvrir la nouvelle URL dans une fenêtre privée. `/` mène à la connexion ; `/register`, `/collection` et toute autre page privée doivent être refusées sans autorisation. `/api/collection` doit renvoyer 401. Sans invitation, aucun compte ne peut être créé. Donner un code à un ami, vérifier son inscription puis sa reconnexion, et vérifier que le même code ne permet pas une deuxième inscription. Révoquer son compte, puis vérifier que son navigateur connecté ne peut plus obtenir les données. Seuls la connexion et les fichiers compilés sous `/assets/`, sans données personnelles, sont publics en production. Les chemins de développement `/src/`, `/@…` et `/node_modules/` exigent une session autorisée en production. Le frontend revient à la connexion lorsqu’un rafraîchissement reçoit 401, notamment après expiration ou révocation ; le serveur bloque les requêtes dès la révocation.
 
 ### Sauvegarder, restaurer et mettre à jour
 
@@ -282,6 +293,6 @@ npm run build
 npm run check
 ```
 
-Pour un Chrome déjà installé : `CHROME_PATH=/chemin/vers/chrome npm run test:browser`. Les tests navigateur lancent leur propre serveur Vite sur `127.0.0.1:4175` ; ce port doit être libre. Ils vérifient les sept sections, les noms longs, les listes compactes, les fenêtres modales, la connexion/inscription, l’import partiel de wishlist et les noms français après une recherche, sur des largeurs de **320, 390, 768 et 1440 px**. Les API sont simulées dans ces tests pour rendre les résultats indépendants de Scryfall et de Cardmarket. Les tests API utilisent SQLite en mémoire et vérifient les écritures réelles, les protections CSRF, les reprises d’import et l’annulation après une remise à zéro du compte. Aucun compte réel n’est modifié.
+Pour un Chrome déjà installé : `CHROME_PATH=/chemin/vers/chrome npm run test:browser`. Les tests navigateur lancent leur propre serveur Vite sur `127.0.0.1:4175` ; ce port doit être libre. Ils vérifient les sept sections, les noms longs, les listes compactes, les fenêtres modales, la connexion/inscription, l’import partiel de wishlist et les noms français après une recherche, sur des largeurs de **320, 390, 768 et 1440 px**. Les API sont simulées dans ces tests pour rendre les résultats indépendants de Scryfall et de Cardmarket. Les tests API utilisent SQLite en mémoire et vérifient les écritures réelles, les protections CSRF, les reprises d’import et l’annulation après une remise à zéro du compte. Aucun compte réel n’est modifié. `tests/runtime-access.test.ts` lance aussi le vrai point d’entrée Express en production et le vrai CLI, depuis des répertoires différents, sur une base temporaire : il vérifie `DB_PATH`, l’inscription par invitation, la révocation, la suppression des sessions et la conservation d’une collection existante. Ces tests de sécurité n’exigent pas un build préalable ; les tests navigateur existants utilisent Vite et des API simulées, et ne valident pas à eux seuls la sécurité du serveur.
 
 Les traces des tests navigateur en échec sont conservées dans `test-results/`. Le build refuse les variables, paramètres et imports TypeScript inutilisés.
