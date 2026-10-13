@@ -66,17 +66,25 @@ test('direct French exact lookup rejects ambiguous matches and stores translated
   await assert.rejects(()=>resolver(db)('Usure'),/inconnue ou ambiguë/);
  }finally{globalThis.fetch=original;db.close();}
 });
-test('existing untranslated collection names are localized before the API responds',async()=>{
- const db=openDatabase(':memory:'),original=globalThis.fetch;let calls=0;
+test('collection reads return before a slow background localization finishes',async()=>{
+ const db=openDatabase(':memory:'),original=globalThis.fetch;let calls=0,release!:()=>void,start!:()=>void;
+ let settlePending:Promise<any>|undefined;
+ const waiting=new Promise<void>(resolve=>{release=resolve;}),started=new Promise<void>(resolve=>{start=resolve;});
  db.prepare('INSERT INTO cards VALUES (?,?,?,?)').run(id,'Lightning Bolt',null,'Instant');
- globalThis.fetch=async()=>{calls++;await new Promise(r=>setTimeout(r,20));return new Response(JSON.stringify({data:[translated]}));};
+ globalThis.fetch=async()=>{calls++;start();await waiting;return new Response(JSON.stringify({data:[translated]}));};
  try{
   const agent=request.agent(createApp(db));
   const registered=await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'oldcollection',password:'correct horse battery'}).expect(200);
+  assert.deepEqual((await agent.get('/api/collection')).body,[]);
   db.prepare('INSERT INTO collection VALUES (?,?,?)').run(registered.body.id,id,2);
+  const pending=agent.get('/api/collection');settlePending=pending.then(response=>response);
+  const first=await Promise.race([settlePending,new Promise<null>(resolve=>setTimeout(()=>resolve(null),100))]);
+  assert.ok(first,'collection response waited on the external localization request');
+  assert.equal(first!.status,200);assert.equal(first!.body[0].name,'Lightning Bolt');assert.equal(first!.body[0].quantity,2);
+  await started;assert.equal(calls,1);release();await settlePending;
+  for(let attempt=0;attempt<20&&!db.prepare('SELECT fr_name FROM card_localizations WHERE oracle_id=?').get(id)?.fr_name;attempt++)await new Promise(resolve=>setTimeout(resolve,5));
   assert.equal((await agent.get('/api/collection')).body[0].fr_name,'Foudre');assert.equal(calls,1);
-  assert.equal((await agent.get('/api/collection')).body[0].fr_name,'Foudre');assert.equal(calls,1);
- }finally{globalThis.fetch=original;db.close();}
+ }finally{release();await settlePending?.catch(()=>{});globalThis.fetch=original;db.close();}
 });
 test('adding an English name immediately returns its French name and keeps the canonical identity',async()=>{
  const db=openDatabase(':memory:'),original=globalThis.fetch;

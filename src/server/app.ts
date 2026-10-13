@@ -162,7 +162,13 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  app.get('/api/me',(_req,res)=>res.json(res.locals.user));
  app.post('/api/auth/logout',(req,res)=>{db.prepare('DELETE FROM sessions WHERE token=?').run(digest(sessionToken(req)));res.clearCookie('session',{path:'/'});res.json({ok:true});});
  for(const table of ['collection','wishlist'] as const){
-  app.get(`/api/${table}`,async(_req,res)=>res.json(await translate(db.prepare(`SELECT c.*,t.quantity${table==='collection'?",(SELECT group_concat(e.id||':'||e.quantity) FROM collection_entries e WHERE e.user_id=t.user_id AND e.oracle_id=t.oracle_id) AS entries_revision":''} FROM ${table} t JOIN cards c USING(oracle_id) WHERE user_id=? ORDER BY c.name`).all(res.locals.user.id) as unknown as Card[])));
+  app.get(`/api/${table}`,(_req,res)=>{
+   const cards=db.prepare(`SELECT c.*,t.quantity${table==='collection'?",(SELECT group_concat(e.id||':'||e.quantity) FROM collection_entries e WHERE e.user_id=t.user_id AND e.oracle_id=t.oracle_id) AS entries_revision":''} FROM ${table} t JOIN cards c USING(oracle_id) WHERE user_id=? ORDER BY c.name`).all(res.locals.user.id) as unknown as Card[];
+   // Localization is a best-effort enhancement. Do not hold inventory reads
+   // open while Scryfall is slow; localizer fills its cache in the background.
+   void translate(cards,false);
+   res.json(cards);
+  });
   app.put(`/api/${table}`,async(req,res)=>{
    const input=z.object({name:z.string().trim().min(1).max(200),quantity:z.number().int().min(1).max(9999)}).parse(req.body);
    const userId=res.locals.user.id,startGeneration=generation(userId);
