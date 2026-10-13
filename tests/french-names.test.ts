@@ -1,0 +1,89 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import request from 'supertest';
+import {openDatabase} from '../src/server/db';
+import {searchCards,resolver,localizer} from '../src/server/scryfall';
+import {createApp} from '../src/server/app';
+import {displayName,normalizeName} from '../src/shared/card-name';
+const id='4457ed35-7c10-48c8-9776-456485fdf070';
+const translated={oracle_id:id,name:'Lightning Bolt',printed_name:'Foudre',lang:'fr',type_line:'Instant'};
+test('French search ranks localized names and caches the canonical English identity',async()=>{
+ const db=openDatabase(':memory:');const original=globalThis.fetch;let calls=0;
+ globalThis.fetch=async(input)=>{
+  calls++;const url=new URL(String(input));
+  if(url.pathname.endsWith('autocomplete'))return new Response(JSON.stringify({data:[]}));
+  if(url.pathname.endsWith('named'))return new Response('{}',{status:404});
+  assert.match(url.searchParams.get('q')??'',/lang:fr/);
+  return new Response(JSON.stringify({data:[{...translated,oracle_id:'bb8cccc8-e56f-42fa-a0d7-fc889b5e1c7b',name:'Boltwave',printed_name:'Ondefoudre'},translated]}));
+ };
+ try{
+  const search=searchCards(db),cards=await search('foudre');assert.equal(cards[0].fr_name,'Foudre');assert.equal(cards[0].name,'Lightning Bolt');assert.equal(cards[0].oracle_id,id);
+  assert.equal(db.prepare('SELECT name FROM cards WHERE oracle_id=?').get(id)?.name,'Lightning Bolt');
+  const before=calls;await search('FOUDRE');assert.equal(calls,before);
+  const card=await resolver(db)('FOUDRE');assert.equal(card.oracle_id,id);assert.equal(card.fr_name,'Foudre');assert.equal(calls,before);
+ }finally{globalThis.fetch=original;db.close();}
+});
+test('localizes existing cards once, shares background requests and preserves English fallback',async()=>{
+ const db=openDatabase(':memory:');const original=globalThis.fetch;let calls=0;
+ db.prepare('INSERT INTO cards VALUES (?,?,?,?)').run(id,'Lightning Bolt',null,'Instant');
+ globalThis.fetch=async()=>{calls++;return new Response(JSON.stringify({data:[translated]}));};
+ try{
+  const translate=localizer(db),card={oracle_id:id,name:'Lightning Bolt',image:null,type_line:'Instant'};
+  await translate([{...card}],false);const result=await translate([{...card}]);assert.equal(result[0].fr_name,'Foudre');assert.equal(calls,1);
+  assert.equal((await translate([{...card}]))[0].fr_name,'Foudre');assert.equal(calls,1);
+  assert.equal(displayName({name:'Sol Ring',fr_name:null}),'Sol Ring');assert.equal(displayName({name:'Lightning Bolt',fr_name:'Foudre'}),'Foudre');
+  assert.equal(normalizeName('  ÉCLAIR  '),'eclair');
+ }finally{globalThis.fetch=original;db.close();}
+});
+test('French names are exposed in collection, wishlist, decks and friend matches without rewriting exports',async()=>{
+ const db=openDatabase(':memory:');const original=globalThis.fetch;
+ db.prepare('INSERT INTO cards VALUES (?,?,?,?)').run(id,'Lightning Bolt',null,'Instant');
+ db.prepare('INSERT INTO card_names VALUES (?,?)').run('Lightning Bolt',id);
+ db.prepare('INSERT INTO card_localizations VALUES (?,?,?)').run(id,'Foudre',Date.now());
+ globalThis.fetch=async()=>{throw Error('No remote call expected');};
+ try{
+  const app=createApp(db),alice=request.agent(app),bob=request.agent(app);
+  for(const [agent,username] of [[alice,'alicefr'],[bob,'bobfr']] as const)await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username,password:'correct horse battery'}).expect(200);
+  await alice.put('/api/collection').set('X-Mana-Request','1').send({name:'Lightning Bolt',quantity:2}).expect(200);
+  await bob.put('/api/wishlist').set('X-Mana-Request','1').send({name:'Lightning Bolt',quantity:1}).expect(200);
+  assert.equal((await alice.get('/api/collection')).body[0].fr_name,'Foudre');
+  assert.equal((await bob.get('/api/wishlist')).body[0].fr_name,'Foudre');
+  await alice.post('/api/friends').set('X-Mana-Request','1').send({username:'bobfr'}).expect(201);
+  const relation=(await bob.get('/api/friends')).body[0];await bob.patch('/api/friends/'+relation.id).set('X-Mana-Request','1').send({action:'accept'}).expect(200);
+  assert.equal((await alice.get('/api/matches')).body.give[0].fr_name,'Foudre');
+  const deck=await alice.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Burn',text:'Deck\n1 Lightning Bolt (M10) 146 *F\n'}).expect(201);
+  assert.equal((await alice.get('/api/decks')).body[0].cards[0].fr_name,'Foudre');
+  assert.equal((await alice.get(`/api/decks/${deck.body.id}/cards`)).body.cards[0].fr_name,'Foudre');
+  assert.equal((await alice.get(`/api/decks/${deck.body.id}/export`)).text,'Deck\n1 Lightning Bolt (M10) 146 *F\n');
+ }finally{globalThis.fetch=original;db.close();}
+});
+test('direct French exact lookup rejects ambiguous matches and stores translated split names',async()=>{
+ const db=openDatabase(':memory:');const original=globalThis.fetch;
+ globalThis.fetch=async(input)=>String(input).includes('/named')?new Response('{}',{status:404}):new Response(JSON.stringify({data:[{oracle_id:id,name:'Wear // Tear',lang:'fr',type_line:'Instant',card_faces:[{name:'Wear',printed_name:'Usure'},{name:'Tear',printed_name:'Déchiqueture'}]}]}));
+ try{
+  const card=await resolver(db)('Usure // Déchiqueture');assert.equal(card.fr_name,'Usure // Déchiqueture');assert.equal(card.name,'Wear // Tear');
+  await assert.rejects(()=>resolver(db)('Usure'),/inconnue ou ambiguë/);
+ }finally{globalThis.fetch=original;db.close();}
+});
+test('existing untranslated collection names are localized before the API responds',async()=>{
+ const db=openDatabase(':memory:'),original=globalThis.fetch;let calls=0;
+ db.prepare('INSERT INTO cards VALUES (?,?,?,?)').run(id,'Lightning Bolt',null,'Instant');
+ globalThis.fetch=async()=>{calls++;await new Promise(r=>setTimeout(r,20));return new Response(JSON.stringify({data:[translated]}));};
+ try{
+  const agent=request.agent(createApp(db));
+  const registered=await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'oldcollection',password:'correct horse battery'}).expect(200);
+  db.prepare('INSERT INTO collection VALUES (?,?,?)').run(registered.body.id,id,2);
+  assert.equal((await agent.get('/api/collection')).body[0].fr_name,'Foudre');assert.equal(calls,1);
+  assert.equal((await agent.get('/api/collection')).body[0].fr_name,'Foudre');assert.equal(calls,1);
+ }finally{globalThis.fetch=original;db.close();}
+});
+test('adding an English name immediately returns its French name and keeps the canonical identity',async()=>{
+ const db=openDatabase(':memory:'),original=globalThis.fetch;
+ globalThis.fetch=async(input)=>String(input).includes('/named')?new Response(JSON.stringify({...translated,lang:'en',printed_name:undefined})):new Response(JSON.stringify({data:[translated]}));
+ try{
+  const agent=request.agent(createApp(db));await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'freshfrench',password:'correct horse battery'}).expect(200);
+  const added=await agent.put('/api/collection').set('X-Mana-Request','1').send({name:'Lightning Bolt',quantity:2}).expect(200);
+  assert.equal(added.body.fr_name,'Foudre');assert.equal(added.body.name,'Lightning Bolt');
+  assert.equal((await agent.get('/api/collection')).body[0].fr_name,'Foudre');
+ }finally{globalThis.fetch=original;db.close();}
+});
