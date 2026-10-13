@@ -322,9 +322,13 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  });
  app.post('/api/decks/:id/missing',(req,res)=>{
   if(!db.prepare('SELECT id FROM decks WHERE id=? AND user_id=?').get(req.params.id,res.locals.user.id)){res.status(404).json({error:'Deck introuvable.'});return;}
-  transaction(db,()=>{const missing=db.prepare(`SELECT dc.oracle_id,min(9999,max(0,sum(dc.quantity)-coalesce(o.quantity,0))) AS quantity FROM deck_cards dc LEFT JOIN collection o ON o.oracle_id=dc.oracle_id AND o.user_id=? WHERE deck_id=? AND dc.section<>'maybeboard' GROUP BY dc.oracle_id HAVING sum(dc.quantity)>coalesce(o.quantity,0)`).all(res.locals.user.id,req.params.id);
-   for(const row of missing)db.prepare('INSERT INTO wishlist VALUES (?,?,?) ON CONFLICT(user_id,oracle_id) DO UPDATE SET quantity=max(quantity,excluded.quantity)').run(res.locals.user.id,row.oracle_id,row.quantity);
-  });res.json({ok:true});
+  transaction(db,()=>db.prepare(`INSERT INTO wishlist(user_id,oracle_id,quantity)
+   SELECT ?,dc.oracle_id,min(9999,max(0,sum(dc.quantity)-coalesce(o.quantity,0)))
+   FROM deck_cards dc LEFT JOIN collection o ON o.oracle_id=dc.oracle_id AND o.user_id=?
+   WHERE dc.deck_id=? AND dc.section<>'maybeboard'
+   GROUP BY dc.oracle_id HAVING sum(dc.quantity)>coalesce(o.quantity,0)
+   ON CONFLICT(user_id,oracle_id) DO UPDATE SET quantity=max(quantity,excluded.quantity)`)
+   .run(res.locals.user.id,res.locals.user.id,req.params.id));res.json({ok:true});
  });
  app.delete('/api/decks/:id',(req,res)=>{db.prepare('DELETE FROM decks WHERE id=? AND user_id=?').run(req.params.id,res.locals.user.id);res.json({ok:true});});
  app.use('/api',(_req,res)=>res.status(404).json({error:'Route introuvable.'}));

@@ -8,10 +8,12 @@ export function catalogMatcher(search:ReturnType<typeof catalogSearch>):CatalogM
   if(cached&&cached.expires>Date.now())return cached.result;
   const result=(async()=>{
    const matches=new Set<string>();
-   // Keep scoped OR expressions small. Large oracleid expressions can make
-   // Scryfall's search backend return intermittent internal errors.
-   for(let offset=0;offset<scope.length;offset+=10){
-    const chunk=scope.slice(offset,offset+10);
+   // Keep the generated Scryfall query under roughly 2 KB while batching
+   // enough identifiers to avoid one network round trip per handful of cards.
+   // Long OR expressions are more likely to fail inside Scryfall.
+   const chunkSize=30;
+   for(let offset=0;offset<scope.length;offset+=chunkSize){
+    const chunk=scope.slice(offset,offset+chunkSize);
     const expression=`(${query}) (${chunk.map(id=>`oracleid:${id}`).join(' or ')})`;
     let page=1,more=true;
     while(more){const response=await search(expression,page,'cards');for(const card of response.cards)if(chunk.includes(card.oracle_id))matches.add(card.oracle_id);more=response.has_more;page++;}

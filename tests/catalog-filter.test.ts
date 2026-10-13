@@ -60,3 +60,13 @@ test('a slow catalog request is shared even after the completed-result cache TTL
   time+=30000;await match('c:blue',[a]);assert.equal(calls,1);
  }finally{Date.now=original;release();}
 });
+test('large scoped searches use bounded batches and return only matching inventory cards',async()=>{
+ const ids=Array.from({length:91},(_,index)=>`${String(index+1).padStart(8,'0')}-1111-4111-8111-111111111111`);
+ const matched=new Set(ids.filter((_,index)=>index%7===0));let calls=0;
+ const match=catalogMatcher(async(query,page)=>{
+  calls++;assert.ok(query.length<2000);assert.match(query,/c:blue/);
+  const allowed=new Set([...query.matchAll(/oracleid:([\da-f-]+)/g)].map(result=>result[1]));
+  return {cards:[...allowed].filter(id=>matched.has(id)).map(oracle_id=>({oracle_id,name:'Blue card',image:null,type_line:'Instant'})),total:matched.size,has_more:false,page};
+ });
+ assert.deepEqual(await match('c:blue',ids),matched);assert.equal(calls,4);
+});
