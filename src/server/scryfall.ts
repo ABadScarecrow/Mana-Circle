@@ -38,7 +38,7 @@ export function searchCards(db:DatabaseSync){
   const hit=cache.get(key);if(hit&&hit.expires>Date.now())return hit.cards;
   if(pending.has(key))return pending.get(key)!;
   const job=(async()=>{
-   const local=rankCandidates(query,known.all() as unknown as Card[]).filter(card=>score(query,card)<=0.6).slice(0,8);
+   const local=rankCandidates(query,known.all() as unknown as Card[]).filter(card=>score(query,card)<=0.5).slice(0,8);
    if(local.some(card=>score(query,card)===0)){cache.set(key,{expires:Date.now()+300000,cards:local});return local;}
    let cards:Card[]=[],failure:unknown;
    try{
@@ -51,7 +51,7 @@ export function searchCards(db:DatabaseSync){
      if(!Array.isArray(result.data))throw new ScryfallError('Suggestions Scryfall illisibles.',502);
      cards=result.data.filter((card:any)=>card.oracle_id&&typeof card.name==='string'&&allowed.has(card.name.toLowerCase())).map((card:any)=>save(db,card));
     }else{
-     try{cards=[save(db,await request(`/cards/named?fuzzy=${encodeURIComponent(key)}`))];}catch(error){if(!(error instanceof ScryfallError&&error.status===404))throw error;}
+     try{const card=save(db,await request(`/cards/named?fuzzy=${encodeURIComponent(key)}`));if(score(query,card)<=0.5)cards=[card];}catch(error){if(!(error instanceof ScryfallError&&error.status===404))throw error;}
     }
    }catch(error){failure=error;}
    // A useful English result doesn't need an additional French network lookup.
@@ -71,7 +71,7 @@ export function searchCards(db:DatabaseSync){
      const expression=prefixes.map(prefix=>`name:"${prefix}"`).join(' or ');
      try{const result=await request('/cards/search?q='+encodeURIComponent(expression)+'&unique=cards&include_multilingual=true');
       if(!Array.isArray(result.data))throw new ScryfallError('Suggestions Scryfall illisibles.',502);
-      cards.push(...result.data.filter((card:any)=>card.oracle_id&&typeof card.name==='string').map((card:any)=>save(db,card)).filter((card:Card)=>score(query,card)<=0.6));
+      cards.push(...result.data.filter((card:any)=>card.oracle_id&&typeof card.name==='string').map((card:any)=>save(db,card)).filter((card:Card)=>score(query,card)<=0.5));
      }catch(error){if(!(error instanceof ScryfallError&&error.status===404))failure=error;}
     }
    }

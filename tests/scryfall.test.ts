@@ -12,8 +12,8 @@ test('search ranks API candidates, caches and merges simultaneous requests',asyn
  try{
   const search=searchCards(db);assert.deepEqual(await search(''),[]);assert.deepEqual(await search('x'),[]);assert.equal(calls.length,0);
   const [a,b]=await Promise.all([search('Lightning Bolt'),search('Lightning Bolt')]);
-  assert.equal(a.length,2);assert.equal(a[0].name,'Lightning Bolt');assert.deepEqual(a,b);assert.equal(calls.length,3);assert.equal(a[0].image,'https://cards.scryfall.io/bolt.jpg');assert.equal(a[1].image,null);
-  await search('LIGHTNING BOLT');assert.equal(calls.length,3);
+  assert.equal(a.length,2);assert.equal(a[0].name,'Lightning Bolt');assert.deepEqual(a,b);assert.equal(calls.length,2);assert.equal(a[0].image,'https://cards.scryfall.io/bolt.jpg');assert.equal(a[1].image,null);
+  await search('LIGHTNING BOLT');assert.equal(calls.length,2);
  }finally{globalThis.fetch=original;db.close();}
 });
 test('search uses fuzzy fallback, handles no results and propagates upstream errors',async()=>{

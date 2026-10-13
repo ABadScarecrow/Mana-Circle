@@ -3,26 +3,29 @@ export class ScryfallError extends Error{
 }
 export function scryfallClient({fetcher=(input:string,init:RequestInit)=>fetch(input,init),now=Date.now,sleep=(ms:number)=>new Promise<void>(resolve=>setTimeout(resolve,ms))}:{fetcher?:(input:string,init:RequestInit)=>Promise<Response>;now?:()=>number;sleep?:(ms:number)=>Promise<void>}={}){
  let queue:Promise<unknown>=Promise.resolve(),blockedUntil=0;
- const pending=new Map<string,Promise<any>>(),cache=new Map<string,{expires:number;value:any}>();
+ const pending=new Map<string,Promise<any>>();
  return async(path:string,body?:unknown):Promise<any>=>{
   const url=new URL(path,'https://api.scryfall.com');
   if(url.origin!=='https://api.scryfall.com'||!url.pathname.startsWith('/cards/'))throw new ScryfallError('Réponse de pagination Scryfall invalide.',502);
-  const key=JSON.stringify([url.href,body??null]),cached=cache.get(key);
-  if(body===undefined&&cached&&cached.expires>now())return cached.value;
+  const key=JSON.stringify([url.href,body??null]);
   if(pending.has(key))return pending.get(key)!;
   const job=queue.then(async()=>{
-   if(blockedUntil>now())throw new ScryfallError(`Scryfall limite temporairement les requêtes. Réessaie dans ${Math.ceil((blockedUntil-now())/1000)} secondes.`,429,Math.ceil((blockedUntil-now())/1000));
-   await sleep(100);
+   if(blockedUntil>now())await sleep(blockedUntil-now());
+   // Leave headroom below Scryfall's published request rate to account for
+   // scheduling jitter when several requests are queued at once.
+   await sleep(150);
    for(let attempt=0;attempt<3;attempt++){
     let response:Response;
-     try{response=await fetcher(url.href,{method:body===undefined?'GET':'POST',body:body===undefined?undefined:JSON.stringify(body),headers:{'User-Agent':'ManaCircle/1.0 (+https://github.com/ABadScarecrow/Mana-Circle)','Accept':'application/json;q=0.9,*/*;q=0.8','Content-Type':'application/json'},signal:AbortSignal.timeout(15000)});}catch{
+     try{response=await fetcher(url.href,{method:body===undefined?'GET':'POST',body:body===undefined?undefined:JSON.stringify(body),headers:{'User-Agent':'ManaCircle/1.0 (+https://github.com/ABadScarecrow/Mana-Circle)','Accept':'application/json;q=0.9,*/*;q=0.8','Content-Type':'application/json'},signal:AbortSignal.timeout(15000)});}catch(error){
      if(attempt<2){await sleep(500*(attempt+1));continue;}
-     throw new ScryfallError('Scryfall est injoignable ou prend trop de temps. Réessaie dans quelques instants.',503);
+     const detail=error instanceof Error&&error.message?` (${error.message})`:'';
+     throw new ScryfallError(`Scryfall est injoignable ou prend trop de temps${detail}. Réessaie dans quelques instants.`,503);
     }
     if(response.status===429){
      const header=response.headers.get('Retry-After'),numeric=header===null?NaN:Number(header),date=header?Date.parse(header):NaN;
-     const wait=Math.max(60000,Number.isFinite(numeric)?numeric*1000:Number.isFinite(date)?date-now():60000);
+     const wait=Math.max(1000,Number.isFinite(numeric)?numeric*1000:Number.isFinite(date)?date-now():2000);
      blockedUntil=now()+wait;
+     if(attempt<2){await sleep(wait);continue;}
      throw new ScryfallError(`Scryfall limite temporairement les requêtes. Réessaie dans ${Math.ceil(wait/1000)} secondes.`,429,Math.ceil(wait/1000));
     }
     if(response.status>=500&&attempt<2){await sleep(500*(attempt+1));continue;}
@@ -38,7 +41,6 @@ export function scryfallClient({fetcher=(input:string,init:RequestInit)=>fetch(i
     }
     if(data?.object==='error'&&attempt<2){await sleep(500*(attempt+1));continue;}
     if(!data||typeof data!=='object'||Array.isArray(data)||data.object==='error')throw new ScryfallError('Scryfall a envoyé une réponse illisible. Réessaie plus tard.',502);
-    if(body===undefined){if(cache.size>=32)cache.delete(cache.keys().next().value!);cache.set(key,{expires:now()+60000,value:data});}
     return data;
    }
    throw new ScryfallError('Scryfall indisponible. Réessaie plus tard.',503);
