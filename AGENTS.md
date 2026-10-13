@@ -2,23 +2,23 @@
 
 ## Project Structure & Module Organization
 
-This workspace is currently an initial scaffold: no application source, tests, assets, or dependency manifests are present. The `.agents/`, `.codex/`, `.aws/`, and `.git/` directories are environment-managed; do not treat them as application modules or edit them as part of routine contributions.
+Application code lives in `src/client` (React), `src/server` (Express/SQLite), and `src/shared`. API and unit tests live in `tests/*.test.ts`; Playwright browser suites live in `tests/browser`. Static resources live in `public`. The `.agents/`, `.codex/`, `.aws/`, and `.git/` directories are environment-managed; do not treat them as application modules or edit them as part of routine contributions.
 
 When introducing code, organize application modules under `src/`, automated tests under `tests/`, and static resources under `assets/` where appropriate. Document the actual layout in this guide as the project develops. Keep related functionality together and avoid creating unused directories.
 
 ## Build, Test, and Development Commands
 
-No build, test, or local development commands are configured yet. Do not assume that `npm test`, `make build`, or other ecosystem-specific commands work.
+With Node.js >=24.12, run `npm ci`, then `npm run dev`. Verified checks: `npm test` (unit/API suites), `npm run build` (strict TypeScript with unused-code checks and Vite production build), and `npm run test:browser` (Chromium at 320, 390, 768, and 1440 px). Install Chromium with `npx playwright install chromium`, or set `CHROME_PATH` to a local Chrome executable. `npm run check` runs all three checks. See README.md for setup and test isolation.
 
 When adding a toolchain, provide reproducible setup, development, build, and test commands in a root `README.md`. Commit the relevant dependency manifest and lockfile, and update this section with verified commands.
 
 ## Coding Style & Naming Conventions
 
-No language, formatter, or linter has been established. Follow the conventions of the language selected for the project, and commit shared formatting and lint configuration alongside the first implementation. Use descriptive names and consistent indentation; avoid mixing tabs and spaces within a file.
+Use TypeScript with the repository’s strict `tsconfig.json`, including `noUnusedLocals` and `noUnusedParameters`. No formatter is configured. Follow the conventions of the language selected for the project, and commit shared formatting and lint configuration alongside the first implementation. Use descriptive names and consistent indentation; avoid mixing tabs and spaces within a file.
 
 ## Testing Guidelines
 
-No testing framework or coverage threshold is configured. Add tests for new behavior and bug fixes using the chosen framework's discovery conventions. Keep tests deterministic and document how contributors can run them locally.
+Use Node.js test runner with deterministic in-memory SQLite fixtures for API/unit tests and Playwright for browser behavior. Browser API fixtures avoid remote Scryfall and pricing dependencies. No coverage threshold is configured. Add tests for new behavior and bug fixes using the chosen framework's discovery conventions. Keep tests deterministic and document how contributors can run them locally.
 
 ## Commit & Pull Request Guidelines
 
@@ -29,3 +29,5 @@ Pull requests should explain the change, its purpose, and validation performed. 
 ## Security & Configuration
 
 Never commit credentials, tokens, or private configuration. Provide placeholder values in example configuration files and document required environment variables when configuration is introduced.
+
+Private access administration lives in `src/server/access.ts`, `config.ts`, and `admin.ts`. `npm run admin --` manages invitations, access grants, revocation, and coherent SQLite backups; see README.md.

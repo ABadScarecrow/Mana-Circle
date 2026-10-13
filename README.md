@@ -2,24 +2,123 @@
 
 Un petit outil entre amis : decks, collection, wishlist et échanges. React + TypeScript, Express et SQLite, dans un seul dépôt. Pas de service de base de données à installer.
 
-## Lancer le site
+## Site privé et hébergement EndeavourOS
 
-Avec Node.js 24.12 ou supérieur :
+Prérequis : Node.js >=24.12, npm, Git et SQLite. Depuis le dépôt, ne jamais lancer le serveur avec sudo. Installer Cloudflare Tunnel depuis le dépôt Extra d’Arch ([paquet officiel](https://archlinux.org/packages/extra/x86_64/cloudflared/)) :
 
 ```bash
+sudo pacman -Syu nodejs npm git sqlite cloudflared
+node --version
 npm ci
-npm run dev
+npm run build
 ```
 
-Ouvrir **http://localhost:3000**, créer un compte et inviter ses amis par leur pseudo. Les données restent dans `data/mana.sqlite`. Les collections ne sont croisées qu’entre amis acceptés.
+Les comptes existants et leurs collections sont conservés. La migration ajoute seulement `invitations` et `site_access`, automatiquement à l’ouverture. **Les anciens comptes restent interdits jusqu’à autorisation explicite**. Avant la première ouverture sur disque, arrêter l’ancien serveur et sauvegarder :
 
 ```bash
-npm test
-npm run build
-NODE_ENV=production npm start
+mkdir -p backups
+sqlite3 data/mana.sqlite ".backup 'backups/avant-acces-prive.sqlite'"
 ```
 
-Le dernier lancement sert l’interface compilée et utilise des cookies sécurisés : HTTPS est nécessaire. `PORT` et `APP_ORIGIN` permettent de changer l’adresse si besoin ; sinon aucune configuration n’est requise. Les fichiers `.env` ne sont pas chargés automatiquement.
+Si la base n’existe pas encore, sa création est automatique. Elle reste hors de `dist` et ne peut pas être téléchargée via HTTP. Ne jamais placer la base ni les sauvegardes dans les ressources publiques.
+
+### Administrer les accès depuis le terminal
+
+Toutes les commandes utilisent `DB_PATH` si défini, sinon `data/mana.sqlite`. Ne jamais utiliser une autre base par inadvertance. Il n’y a pas d’administration publique.
+
+```bash
+npm run admin -- invite "Alice" 72
+npm run admin -- list
+npm run admin -- revoke-invite ID_A_REMPLACER
+npm run admin -- revoke-user PSEUDO_A_REMPLACER
+npm run admin -- allow-user PSEUDO_EXISTANT
+```
+
+`invite` affiche un ID et un code aléatoire de 256 bits : transmettre uniquement le code à son destinataire, par un canal privé. Sa durée est de 72 heures par défaut, maximum 720 heures. Seul son SHA-256 est conservé. L’ami ouvre `/login`, saisit son invitation, puis accède à `/register` grâce à un cookie HttpOnly. Le code est consommé dans la même transaction que la création du compte. Aucun compte tiers n’est requis. Aux visites suivantes, le pseudonyme et le mot de passe suffisent.
+
+Révoquer une invitation déjà utilisée révoque aussi son compte et supprime ses sessions. `revoke-user` interdit immédiatement les prochaines requêtes, sans effacer les données. `allow-user` réautorise un compte existant ; les sessions supprimées ne sont pas restaurées. Une requête déjà en cours peut se terminer. Le libellé sert au suivi administratif et ne lie pas cryptographiquement le code à une identité : son porteur peut l’utiliser, donc ne pas le publier.
+
+### Lancer le tunnel et la production
+
+Dans un premier terminal, lancer le tunnel avant l’application pour obtenir son origine exacte :
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:3000
+```
+
+Les premières requêtes peuvent échouer tant que l’application n’est pas lancée. Copier l’URL HTTPS imprimée dans `.env` (ne pas copier de chemin ni de slash final) :
+
+```bash
+cp .env.example .env
+chmod 600 .env
+nano .env
+```
+
+Configuration attendue :
+
+```dotenv
+NODE_ENV=production
+HOST=127.0.0.1
+PORT=3000
+APP_ORIGIN=https://votre-adresse.trycloudflare.com
+TRUST_PROXY=loopback
+DB_PATH=data/mana.sqlite
+```
+
+Dans un second terminal, depuis le dépôt :
+
+```bash
+set -a
+source .env
+set +a
+umask 077
+npm start
+```
+
+Le fichier fourni ne contient que des affectations shell simples ; ne sourcer que votre propre configuration. Les fichiers `.env` ne sont pas chargés automatiquement. `npm start` exécute Express via tsx et sert le frontend compilé dans `dist`. Aucun serveur Vite n’est utilisé en production. En cas de changement de port, adapter aussi `--url`. `HOST` est limité à la boucle locale. Le proxy n’est accepté que depuis la boucle locale ; ne pas ajouter de proxy intermédiaire sans revoir la chaîne de confiance. Les autres programmes locaux sont donc dans le périmètre de confiance. Le HTTP entre cloudflared et Express reste exclusivement local ; les navigateurs utilisent HTTPS et des cookies Secure.
+
+Arrêter chaque processus avec Ctrl+C dans son terminal. Le PC, l’application, le tunnel et la connexion Internet doivent rester actifs ; désactiver la mise en veille si nécessaire. Aucun port entrant à ouvrir sur la box. Après un redémarrage du tunnel, mettre à jour `APP_ORIGIN` et redémarrer Express, puis retransmettre la nouvelle URL. Ne jamais remplacer l’origine par un joker pour éviter cette étape.
+
+Les [Quick Tunnels officiels](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/) sont gratuits, sans compte ni domaine, destinés aux essais : adresse temporaire, aucune garantie de disponibilité, maximum 200 requêtes simultanées, pas de SSE. L’import actuel utilise NDJSON, pas SSE ; vérifier néanmoins un import réel à travers le tunnel, car le réseau et les délais du proxy peuvent interrompre un gros import. Une adresse stable nécessite une autre configuration, typiquement un tunnel nommé et un domaine. Cloudflare termine TLS et voit le trafic ; cette solution n’est pas un chiffrement de bout en bout indépendant de Cloudflare.
+
+### Vérifier depuis un autre réseau
+
+Sur un téléphone en données mobiles, ouvrir la nouvelle URL dans une fenêtre privée. `/` mène à la connexion ; `/register`, `/collection` et toute autre page privée doivent être refusées sans autorisation. `/api/collection` doit renvoyer 401. Sans invitation, aucun compte ne peut être créé. Donner un code à un ami, vérifier son inscription puis sa reconnexion, et vérifier que le même code ne permet pas une deuxième inscription. Révoquer son compte, puis vérifier que son navigateur connecté ne peut plus obtenir les données. Seuls la connexion et les fichiers JS/CSS sans données personnelles sont publics.
+
+### Sauvegarder, restaurer et mettre à jour
+
+Le mécanisme de sauvegarde SQLite inclut les transactions validées du WAL ; ne pas simplement copier un fichier SQLite pendant une écriture :
+
+```bash
+mkdir -p backups
+npm run admin -- backup backups/mana-sauvegarde.sqlite
+sqlite3 backups/mana-sauvegarde.sqlite 'PRAGMA integrity_check;'
+```
+
+Conserver plusieurs sauvegardes datées, avec permissions privées, idéalement sur un autre support. Elles contiennent les comptes, hashes et données personnelles. Pour restaurer, arrêter **tous** les processus utilisant la base (serveur et commandes admin), puis garder l’ensemble actuel avant remplacement :
+
+```bash
+mkdir -p backups/avant-restauration
+mv data/mana.sqlite backups/avant-restauration/
+# Déplacer aussi les fichiers WAL/SHM s’ils existent, serveur arrêté :
+[ ! -f data/mana.sqlite-wal ] || mv data/mana.sqlite-wal backups/avant-restauration/
+[ ! -f data/mana.sqlite-shm ] || mv data/mana.sqlite-shm backups/avant-restauration/
+cp backups/mana-sauvegarde.sqlite data/mana.sqlite
+chmod 600 data/mana.sqlite
+sqlite3 data/mana.sqlite 'PRAGMA integrity_check; DELETE FROM sessions;'
+```
+
+Utiliser un répertoire de conservation neuf à chaque restauration. Adapter les chemins si `DB_PATH` diffère. Une restauration revient également à l’état antérieur des autorisations et invitations : revoir `npm run admin -- list`, révoquer les codes/comptes nécessaires avant de relancer. Les sessions sont supprimées dans la procédure ci-dessus.
+
+Pour mettre à jour : sauvegarder, arrêter le serveur, intégrer les changements Git sans écraser vos modifications locales, puis `npm ci`, `npm test`, `npm run build` et relancer. Mettre EndeavourOS et cloudflared à jour régulièrement. `.env`, bases et sauvegardes sont ignorés par Git.
+
+### Protections et limites
+
+Bcrypt coût 12, pseudonymes 3–30 caractères ASCII, mots de passe 12 caractères minimum et 72 **octets UTF-8** maximum. Sessions de sept jours, jetons aléatoires de 256 bits hashés en base, révocation au logout. Cookies HttpOnly, SameSite Strict et Secure en production. Chaque API vérifie session et autorisation, puis propriété des données ou amitié acceptée. Les écritures exigent `X-Mana-Request: 1` ; toute origine fournie doit correspondre exactement à `APP_ORIGIN`. Aucun CORS permissif n’est activé. Un client non navigateur peut omettre Origin, mais doit toujours fournir une invitation ou une session autorisée.
+
+Connexion, inscription et validation d’invitation partagent une limite de 25 requêtes par IP sur 15 minutes. Elle est en mémoire, se réinitialise au redémarrage et peut affecter plusieurs amis derrière une même IP. Les requêtes métier n’ont pas de quota global ; les imports autorisés restent coûteux. Un attaquant réparti sur plusieurs IP peut toujours provoquer une charge : ce petit serveur n’a pas vocation à résister à un déni de service massif. Le parseur JSON accepte jusqu’à 64 Mo pour conserver les imports existants, puis la limite métier de 10 Mo est contrôlée. Garder la machine et les comptes locaux sûrs.
+
+Le démarrage de production refuse une origine absente, HTTP, avec chemin, un proxy non explicitement configuré ou une écoute hors boucle locale. Le mode développement (`npm run dev`, puis invitation via admin) est pour les essais locaux uniquement et utilise des cookies sans Secure. Ne jamais publier le serveur de développement.
 
 ## Importer et exporter ses decks
 
@@ -49,7 +148,7 @@ Les quantités avec ou sans `x`, les noms seuls (quantité 1), les éditions `(S
 
 Chaque ligne de deck est conservée séparément : deux Sol Ring de différentes éditions ne fusionnent pas. **Exporter .txt** télécharge les lignes dans leur ordre, en conservant leur écriture (`x`, édition, numéro, foil). Les titres de section sont normalisés en Commander, Deck, Sideboard et Maybeboard, avec une ligne vide entre sections.
 
-Un import partiel enregistre les lignes reconnues et laisse uniquement les erreurs à corriger dans le champ, avec leurs métadonnées et leur section. Une correction est ajoutée au même deck. Les imports additionnent les cartes à une collection ; les saisies individuelles remplacent sa quantité totale. Maximum 9999 exemplaires par ligne et par carte dans une collection/wishlist ; les decks peuvent conserver plus de 9999 exemplaires répartis sur plusieurs lignes.
+Un import partiel enregistre les lignes reconnues et laisse uniquement les erreurs à corriger dans le champ, avec leurs métadonnées et leur section. Une correction est ajoutée au même deck. Dans **Collection** et **Wishlist**, le bouton **Importer** accepte aussi les listes collées et les fichiers texte/CSV ManaBox, avec progression et correction des erreurs. Les imports additionnent les cartes à la liste choisie ; les saisies individuelles remplacent sa quantité totale. Maximum 9999 exemplaires par ligne et par carte dans une collection/wishlist ; les decks peuvent conserver plus de 9999 exemplaires répartis sur plusieurs lignes.
 
 Les cartes du **Maybeboard** sont exportées mais exclues du calcul des cartes manquantes. Pour les autres sections, on additionne les quantités puis on soustrait la collection. Ajouter les manquantes à la wishlist conserve le maximum avec les besoins existants, avec une limite de 9999 exemplaires par carte et ne réserve aucune carte.
 
@@ -139,7 +238,7 @@ Toutes les routes commencent par `/api` et nécessitent une session, sauf la con
 | `DELETE /friends/:id` | Annuler, refuser ou supprimer |
 | `GET /matches` | Croisements dans les deux sens |
 
-Ne pas committer la base ou des secrets. Pour une sauvegarde simple, arrêter le serveur avant de copier la base et ses fichiers WAL. Un seul processus serveur suffit. Les images des cartes restent celles de Scryfall, indépendamment des couleurs de l’interface.
+Ne pas committer la base ou des secrets. Utiliser la procédure de sauvegarde cohérente décrite plus haut. Un seul processus serveur suffit. Les images des cartes restent celles de Scryfall, indépendamment des couleurs de l’interface.
 
 ## Outils compacts, tailles et CSV ManaBox
 
@@ -170,3 +269,19 @@ Ordre de priorité : guide **Cardmarket AVG**, prix EUR Cardmarket relayé par *
 Les catalogues [ManaPool](https://manapool.com/api/docs/v1/openapi.json) et [CardKingdom](https://api.cardkingdom.com/api/v2/pricelist), ainsi que le taux [Frankfurter](https://frankfurter.dev/), sont publics et mis en cache 24 h, avec requêtes simultanées mutualisées. Aucun compte fournisseur ni nouvelle configuration n’est nécessaire. Les anciennes données de repli restent utilisables au plus sept jours, avec indication de leur ancienneté. Les échecs sont réessayés après une minute. [TCGplayer n’accorde actuellement plus de nouveaux accès API](https://docs.tcgplayer.com/docs/getting-started) : ses données sont obtenues via Scryfall, sans prétendre à un accès direct.
 
 Cette section remplace les règles précédentes qui excluaient les repères de repli des totaux et laissaient systématiquement etched non coté.
+
+
+## Validation automatisée
+
+```bash
+npm test
+npx playwright install chromium
+npm run test:browser
+npm run build
+# ou toutes les vérifications :
+npm run check
+```
+
+Pour un Chrome déjà installé : `CHROME_PATH=/chemin/vers/chrome npm run test:browser`. Les tests navigateur lancent leur propre serveur Vite sur `127.0.0.1:4175` ; ce port doit être libre. Ils vérifient les sept sections, les noms longs, les listes compactes, les fenêtres modales, la connexion/inscription, l’import partiel de wishlist et les noms français après une recherche, sur des largeurs de **320, 390, 768 et 1440 px**. Les API sont simulées dans ces tests pour rendre les résultats indépendants de Scryfall et de Cardmarket. Les tests API utilisent SQLite en mémoire et vérifient les écritures réelles, les protections CSRF, les reprises d’import et l’annulation après une remise à zéro du compte. Aucun compte réel n’est modifié.
+
+Les traces des tests navigateur en échec sont conservées dans `test-results/`. Le build refuse les variables, paramètres et imports TypeScript inutilisés.

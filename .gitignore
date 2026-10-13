@@ -3,3 +3,11 @@ dist/
 data/
 .env
 *.log
+test-results/
+playwright-report/
+.env.*
+!.env.example
+backups/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

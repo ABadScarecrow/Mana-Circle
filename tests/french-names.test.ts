@@ -1,3 +1,4 @@
+import {createInvitation} from '../src/server/access';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
@@ -43,12 +44,12 @@ test('French names are exposed in collection, wishlist, decks and friend matches
  globalThis.fetch=async()=>{throw Error('No remote call expected');};
  try{
   const app=createApp(db),alice=request.agent(app),bob=request.agent(app);
-  for(const [agent,username] of [[alice,'alicefr'],[bob,'bobfr']] as const)await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username,password:'correct horse battery'}).expect(200);
+  for(const [agent,username] of [[alice,'alicefr'],[bob,'bobfr']] as const)await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username,password:'correct horse battery'}).expect(200);
   await alice.put('/api/collection').set('X-Mana-Request','1').send({name:'Lightning Bolt',quantity:2}).expect(200);
   await bob.put('/api/wishlist').set('X-Mana-Request','1').send({name:'Lightning Bolt',quantity:1}).expect(200);
   assert.equal((await alice.get('/api/collection')).body[0].fr_name,'Foudre');
   assert.equal((await bob.get('/api/wishlist')).body[0].fr_name,'Foudre');
-  await alice.post('/api/friends').set('X-Mana-Request','1').send({username:'bobfr'}).expect(201);
+  await alice.post('/api/friends').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'bobfr'}).expect(201);
   const relation=(await bob.get('/api/friends')).body[0];await bob.patch('/api/friends/'+relation.id).set('X-Mana-Request','1').send({action:'accept'}).expect(200);
   assert.equal((await alice.get('/api/matches')).body.give[0].fr_name,'Foudre');
   const deck=await alice.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Burn',text:'Deck\n1 Lightning Bolt (M10) 146 *F\n'}).expect(201);
@@ -71,7 +72,7 @@ test('existing untranslated collection names are localized before the API respon
  globalThis.fetch=async()=>{calls++;await new Promise(r=>setTimeout(r,20));return new Response(JSON.stringify({data:[translated]}));};
  try{
   const agent=request.agent(createApp(db));
-  const registered=await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'oldcollection',password:'correct horse battery'}).expect(200);
+  const registered=await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'oldcollection',password:'correct horse battery'}).expect(200);
   db.prepare('INSERT INTO collection VALUES (?,?,?)').run(registered.body.id,id,2);
   assert.equal((await agent.get('/api/collection')).body[0].fr_name,'Foudre');assert.equal(calls,1);
   assert.equal((await agent.get('/api/collection')).body[0].fr_name,'Foudre');assert.equal(calls,1);
@@ -81,7 +82,7 @@ test('adding an English name immediately returns its French name and keeps the c
  const db=openDatabase(':memory:'),original=globalThis.fetch;
  globalThis.fetch=async(input)=>String(input).includes('/named')?new Response(JSON.stringify({...translated,lang:'en',printed_name:undefined})):new Response(JSON.stringify({data:[translated]}));
  try{
-  const agent=request.agent(createApp(db));await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'freshfrench',password:'correct horse battery'}).expect(200);
+  const agent=request.agent(createApp(db));await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'freshfrench',password:'correct horse battery'}).expect(200);
   const added=await agent.put('/api/collection').set('X-Mana-Request','1').send({name:'Lightning Bolt',quantity:2}).expect(200);
   assert.equal(added.body.fr_name,'Foudre');assert.equal(added.body.name,'Lightning Bolt');
   assert.equal((await agent.get('/api/collection')).body[0].fr_name,'Foudre');

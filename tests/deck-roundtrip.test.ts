@@ -1,3 +1,4 @@
+import {createInvitation} from '../src/server/access';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,mkdtempSync,rmSync} from 'node:fs';
@@ -26,18 +27,18 @@ test('authenticated import persists separate printings, exports and reimports wi
  };
  try{
   let app=createApp(db,resolve);const agent=request.agent(app);
-  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'tester',password:'correct horse battery'}).expect(200);
+  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'tester',password:'correct horse battery'}).expect(200);
   const response=await agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Zedruu',text:example}).expect(201);
   assert.equal(response.body.imported,19);assert.deepEqual(response.body.errors,[]);
   const id=response.body.id;
   const deck=(await agent.get('/api/decks')).body[0];assert.equal(deck.cards.length,19);assert.equal(deck.cards.filter((c:any)=>c.name==='Sol Ring').length,2);
   await request(app).get('/api/decks/'+id+'/export').expect(401);
   const outsider=request.agent(app);
-  await outsider.post('/api/auth/register').set('X-Mana-Request','1').send({username:'outsider',password:'correct horse battery'}).expect(200);
+  await outsider.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'outsider',password:'correct horse battery'}).expect(200);
   await outsider.get('/api/decks/'+id+'/export').expect(404);
   // Reopen the on-disk database: the export must come from persisted data, not request memory.
   db.close();db=openDatabase(path);app=createApp(db,resolve);const reopened=request.agent(app);
-  await reopened.post('/api/auth/login').set('X-Mana-Request','1').send({username:'tester',password:'correct horse battery'}).expect(200);
+  await reopened.post('/api/auth/login').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'tester',password:'correct horse battery'}).expect(200);
   const exported=await reopened.get('/api/decks/'+id+'/export').expect('Content-Type',/text\/plain/).expect(200);
   assert.equal(exported.text,example);assert.deepEqual(semantic(exported.text),semantic(example));
   const importedAgain=await reopened.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Copie',text:exported.text}).expect(201);
@@ -53,7 +54,7 @@ test('authenticated import persists separate printings, exports and reimports wi
 test('10 MiB import boundary is checked in bytes, including UTF-8 and JSON escaping',async()=>{
  const db=openDatabase(':memory:');const agent=request.agent(createApp(db,async()=>{throw Error('No lookup needed');}));
  try{
-  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'sizecheck',password:'correct horse battery'}).expect(200);
+  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'sizecheck',password:'correct horse battery'}).expect(200);
   const send=(text:string)=>agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Large',text});
   const atLimit='#'+'a'.repeat(10*1024*1024-1);
   await send(atLimit).expect(422); // Accepted size; comment-only list contains no cards.

@@ -1,3 +1,4 @@
+import {createInvitation} from '../src/server/access';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
@@ -34,7 +35,7 @@ test('authenticated CSV import resolves exact Scryfall printing, preserves stock
  db.prepare('INSERT INTO card_localizations VALUES (?,?,?)').run(oracle,'Foudre',Date.now());
  const agent=request.agent(createApp(db));
  try{
-  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'csvfriend',password:'correct horse battery'}).expect(200);
+  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'csvfriend',password:'correct horse battery'}).expect(200);
   const added=await agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'ManaBox',text:csv+`Foudre,M10,146,foil,0,${id},fr,NM,Deck\n`,format:'csv'}).expect(201);
   assert.equal(added.body.imported,2);assert.equal(added.body.errors.length,1);assert.equal(parseImport(added.body.retryText).errors.length,1);assert.equal(added.body.retryText.split('\n').length,2);
   const rows=(await agent.get(`/api/decks/${added.body.id}/cards`)).body.cards;
@@ -57,7 +58,7 @@ test('30,000 CSV lines deduplicate printing lookups and retain complete CSV expo
  const prints=Array.from({length:150},(_,i)=>({id:`11111111-1111-4111-8111-${String(i).padStart(12,'0')}`,oracle_id:`22222222-2222-4222-8222-${String(i).padStart(12,'0')}`,name:`Card ${i}`,set:'tst',collector_number:String(i),lang:'en',type_line:'Artifact'}));
  globalThis.fetch=async(url,options)=>{assert.ok(String(url).endsWith('/cards/collection'));calls++;const ids=JSON.parse(String(options?.body)).identifiers;assert.ok(ids.length<=75);return new Response(JSON.stringify({data:ids.map((entry:any)=>prints.find(p=>p.id===entry.id))}));};
  try{
-  const agent=request.agent(createApp(db));await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'csvlarge',password:'correct horse battery'}).expect(200);
+  const agent=request.agent(createApp(db));await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'csvlarge',password:'correct horse battery'}).expect(200);
   const text=header+'\n'+Array.from({length:30000},(_,i)=>`Card ${i%150},tst,${i%150},normal,1,${prints[i%150].id},en,NM,Deck`).join('\n');
   const start=performance.now();const result=await agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Large CSV',text,format:'csv'}).expect(201);
   t.diagnostic(`CSV 30 000 lignes : ${(performance.now()-start).toFixed(0)} ms (API simulée)`);

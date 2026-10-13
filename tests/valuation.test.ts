@@ -1,3 +1,4 @@
+import {createInvitation} from '../src/server/access';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {openDatabase} from '../src/server/db';
@@ -30,12 +31,12 @@ test('exchange values respect accepted friends and min(wanted, available)',async
  globalThis.fetch=async()=>new Response(JSON.stringify({createdAt:'2026-10-12',priceGuides:[{idProduct:1,avg:2}]}));
  const resolve=async()=>({oracle_id:'bolt',name:'Bolt',image:null,type_line:''}),app=createApp(db,resolve),alice=request.agent(app),bob=request.agent(app),stranger=request.agent(app);
  try{
-  for(const [agent,username] of [[alice,'alice'],[bob,'bobby'],[stranger,'outsider']] as const)await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username,password:'correct horse battery'}).expect(200);
+  for(const [agent,username] of [[alice,'alice'],[bob,'bobby'],[stranger,'outsider']] as const)await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username,password:'correct horse battery'}).expect(200);
   await alice.put('/api/wishlist').set('X-Mana-Request','1').send({name:'Bolt',quantity:4}).expect(200);
   for(const agent of [bob,stranger])await agent.put('/api/collection').set('X-Mana-Request','1').send({name:'Bolt',quantity:3}).expect(200);
   const requestValue=()=>alice.post('/api/valuation').set('X-Mana-Request','1').send({target:'matches'});
   assert.equal((await requestValue()).body.receive.length,0);
-  await alice.post('/api/friends').set('X-Mana-Request','1').send({username:'bobby'}).expect(201);
+  await alice.post('/api/friends').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'bobby'}).expect(201);
   const relation=(await bob.get('/api/friends')).body[0];await bob.patch('/api/friends/'+relation.id).set('X-Mana-Request','1').send({action:'accept'}).expect(200);
   const value=(await requestValue()).body.receive;assert.equal(value.length,1);assert.equal(value[0].unit_price,2);assert.equal(value[0].exchange_value,6);assert.equal(value[0].wanted_value,8);assert.equal(value[0].available_value,6);
   const privateDeck=await bob.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Private',text:'1 Bolt'}).expect(201);

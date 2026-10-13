@@ -1,3 +1,4 @@
+import {createInvitation} from '../src/server/access';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
@@ -21,7 +22,7 @@ test('deck price filtering and sorting operate before pagination and preserve ac
  globalThis.fetch=async()=>Response.json({createdAt:'2026-10-13',priceGuides:[{idProduct:1,avg:1},{idProduct:2,avg:10}]});
  const resolve=async(name:string)=>db.prepare('SELECT * FROM cards WHERE name=?').get(name) as any;
  try{
-  const agent=request.agent(createApp(db,resolve));await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'priceddeck',password:'correct horse battery'}).expect(200);
+  const agent=request.agent(createApp(db,resolve));await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'priceddeck',password:'correct horse battery'}).expect(200);
   const deck=await agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Prices',text:Array.from({length:101},()=> '1 Cheap (TST) 1').join('\n')+'\n2 Expensive (TST) 2'}).expect(201);
   const expensive=await agent.get(`/api/decks/${deck.body.id}/cards?priceMin=5&sort=price-desc`).expect(200);assert.equal(expensive.body.total,1);assert.equal(expensive.body.quantity,2);assert.equal(expensive.body.cards[0].unit_price,10);
   const sorted=await agent.get(`/api/decks/${deck.body.id}/cards?sort=price-desc`).expect(200);assert.equal(sorted.body.cards[0].name,'Expensive');assert.equal(sorted.body.total,102);

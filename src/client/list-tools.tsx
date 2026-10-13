@@ -1,9 +1,8 @@
-import React,{useEffect,useState,useRef} from 'react';
+import {useEffect,useState,useRef} from 'react';
 import {ToolButton} from './tool-button';
 import {CardPrice} from './card-prices';
 import {CardName} from './french-names';
 import {CardImage,CardPreview} from './cards';
-import {displayName} from '../shared/card-name';
 import {emptyFilters,buildCatalogQuery,type LocalFilters} from '../shared/filters';
 type Request=(path:string,method?:string,body?:unknown,signal?:AbortSignal)=>Promise<any>;
 export const euro=(value:number|null|undefined)=>value==null?'Non coté':new Intl.NumberFormat('fr-FR',{style:'currency',currency:'EUR'}).format(value);

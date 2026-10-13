@@ -1,3 +1,4 @@
+import {createInvitation} from '../src/server/access';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
@@ -18,9 +19,9 @@ test('reset wipes only the current user, retains identity, revokes other session
  const app=createApp(db,resolve),alice=request.agent(app),second=request.agent(app),bob=request.agent(app);
  const post=(agent:typeof alice,path:string,body:object)=>agent.post(path).set('X-Mana-Request','1').send(body);
  try{
-  await post(alice,'/api/auth/register',{username:'alice',password:'correct horse battery'}).expect(200);
-  await post(second,'/api/auth/login',{username:'alice',password:'correct horse battery'}).expect(200);
-  await post(bob,'/api/auth/register',{username:'bobby',password:'correct horse battery'}).expect(200);
+  await post(alice,'/api/auth/register',{invitation:createInvitation(db,'test').token,username:'alice',password:'correct horse battery'}).expect(200);
+  await post(second,'/api/auth/login',{invitation:createInvitation(db,'test').token,username:'alice',password:'correct horse battery'}).expect(200);
+  await post(bob,'/api/auth/register',{invitation:createInvitation(db,'test').token,username:'bobby',password:'correct horse battery'}).expect(200);
   for(const agent of [alice,bob])await agent.put('/api/collection').set('X-Mana-Request','1').send({name:'Bolt',quantity:3}).expect(200);
   await alice.put('/api/wishlist').set('X-Mana-Request','1').send({name:'Bolt',quantity:1}).expect(200);
   const deck=await post(alice,'/api/decks/import',{name:'Burn',text:'1 Bolt'}).expect(201);
@@ -29,7 +30,7 @@ test('reset wipes only the current user, retains identity, revokes other session
   await alice.patch('/api/settings').set('X-Mana-Request','1').send({collection_target:500}).expect(200);
   await alice.patch('/api/settings').set('X-Mana-Request','1').send({collection_target:-1}).expect(400);
   const summary=(await alice.get('/api/decks?summary=1')).body[0];assert.equal(summary.target_size,100);assert.equal(summary.line_count,1);assert.equal(summary.distinct_count,1);
-  await post(alice,'/api/friends',{username:'bobby'}).expect(201);
+  await post(alice,'/api/friends',{invitation:createInvitation(db,'test').token,username:'bobby'}).expect(201);
   await post(alice,'/api/account/reset',{password:'incorrect',confirmation:'RESET'}).expect(403);
   await post(alice,'/api/account/reset',{password:'correct horse battery',confirmation:'no'}).expect(400);
   assert.equal((await alice.get('/api/collection')).body.length,1);
@@ -44,7 +45,7 @@ test('an import in flight is cancelled by a reset instead of restoring deleted d
  const db=openDatabase(':memory:');let release:()=>void=()=>{};let started:()=>void=()=>{};const begun=new Promise<void>(r=>started=r),waiting=new Promise<void>(r=>release=r);
  const app=createApp(db,async(name:string)=>{started();await waiting;const card={oracle_id:name,name,image:null,type_line:''};db.prepare('INSERT OR IGNORE INTO cards VALUES (?,?,?,?)').run(name,name,null,'');return card;}),agent=request.agent(app);
  try{
-  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'raceuser',password:'correct horse battery'}).expect(200);
+  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'raceuser',password:'correct horse battery'}).expect(200);
   const importing=agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Race',text:'1 Bolt'}).then(r=>r);
   await begun;await agent.post('/api/account/reset').set('X-Mana-Request','1').send({password:'correct horse battery',confirmation:'RESET'}).expect(200);
   release();assert.equal((await importing).status,409);assert.equal((await agent.get('/api/decks')).body.length,0);
@@ -54,7 +55,7 @@ test('deck filters apply before pagination and counts reflect matching rows',asy
  const db=openDatabase(':memory:');const resolve=async(name:string)=>{const card={oracle_id:name,name,image:null,type_line:'Instant'};db.prepare('INSERT OR IGNORE INTO cards VALUES (?,?,?,?)').run(name,name,null,'Instant');db.prepare('INSERT OR IGNORE INTO card_names VALUES (?,?)').run(name,name);return card;};
  const agent=request.agent(createApp(db,resolve));
  try{
-  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'filteruser',password:'correct horse battery'}).expect(200);
+  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'filteruser',password:'correct horse battery'}).expect(200);
   const imported=await agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Deck',text:'Deck\n'+ '1 Bolt (M10) 146\n'.repeat(120)+'Sideboard\n2 Counterspell (DMR) 49 *F'}).expect(201);
   db.prepare('INSERT INTO card_localizations VALUES (?,?,?)').run('Counterspell','Contresort',Date.now());
   const result=await agent.get(`/api/decks/${imported.body.id}/cards?section=sideboard&foil=1&name=CONTRESORT&set=dmr&min=2`).expect(200);

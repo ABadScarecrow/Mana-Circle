@@ -2,10 +2,12 @@ import express from 'express';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { hash, compare } from 'bcryptjs';
-import { randomBytes, randomUUID, createHash } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import { transaction } from './db';
+import {digest,validInvitation} from './access';
+import {configuration} from './config';
 import { resolver, searchCards, batchResolver, printingDetails, localizer, catalogSearch, collectionPrintings, type Card, type Resolution } from './scryfall';
 import { exportDeck, type DeckLine } from './parser';
 import {matchesPriceFilters,comparePrices} from '../shared/filters';
@@ -16,10 +18,11 @@ import {MAX_IMPORT_BYTES} from '../shared/import-limit';
 import {marketPrices} from './prices';
 import { getMatches } from './matches';
 
-const credentials=z.object({username:z.string().trim().regex(/^[a-zA-Z0-9_-]{3,30}$/),password:z.string().min(12).max(72)});
+const credentials=z.object({username:z.string().trim().regex(/^[a-zA-Z0-9_-]{3,30}$/),password:z.string().min(12).max(72).refine(value=>Buffer.byteLength(value,'utf8')<=72)});
 const sessionToken=(req:express.Request)=>req.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1]??'';
-const digest=(token:string)=>createHash('sha256').update(token).digest('hex');
+const inviteToken=(req:express.Request)=>req.headers.cookie?.match(/(?:^|;\s*)invitation=([a-f0-9]{64})(?:;|$)/)?.[1]??'';
 export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolver>){
+ const config=configuration();
  const suppliedResolver=resolveCard;resolveCard??=resolver(db);
  const resolveMany=suppliedResolver?async(names:string[],progress:(done:number,total:number)=>void)=>{const results=new Map<string,Resolution>();for(const name of names){const key=name.toLowerCase();try{results.set(key,{card:await suppliedResolver(name)});}catch(e){results.set(key,{error:(e as Error).message});}progress(results.size,names.length);}return results;}:batchResolver(db);
  const details=printingDetails(),prices=marketPrices(),catalog=catalogSearch(db);
@@ -28,32 +31,50 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  const translate=suppliedResolver?async<T extends Card>(cards:T[],_wait=true)=>cards:localizer(db);
  db.function('normalized_name',(value)=>normalizeName(String(value??'')));
  const app=express();app.disable('x-powered-by');
- app.use(helmet({contentSecurityPolicy:process.env.NODE_ENV==='production'?{directives:{'img-src':["'self'",'https://cards.scryfall.io','data:'],'script-src':["'self'"], 'connect-src':["'self'",'ws:','wss:']}}:false}));
+ app.set('trust proxy',config.trustProxy?'loopback':false);
+ app.use((_req,res,next)=>{res.set('Referrer-Policy','no-referrer');next();});
+ app.use(helmet({contentSecurityPolicy:config.production?{directives:{'img-src':["'self'",'https://cards.scryfall.io','data:'],'script-src':["'self'"], 'connect-src':["'self'",'ws:','wss:']}}:false}));
  app.use(express.json({limit:'64mb'}));
  app.use('/api',(req,res,next)=>{
   if(!['GET','HEAD','OPTIONS'].includes(req.method) && req.get('X-Mana-Request')!=='1') {res.status(403).json({error:'En-tête de protection CSRF manquant.'});return;}
   const origin=req.get('origin');
-  if(origin && origin!== (process.env.APP_ORIGIN??'http://localhost:3000')){res.status(403).json({error:'Origine refusée.'});return;}
+  if(origin && origin!== config.origin){res.status(403).json({error:'Origine refusée.'});return;}
   res.set('Cache-Control','no-store');next();
  });
  const authLimiter=rateLimit({windowMs:15*60000,limit:25});
+ app.post('/api/auth/invitation',authLimiter,(req,res)=>{
+  const {token}=z.object({token:z.string().length(64)}).parse(req.body);
+  if(!validInvitation(db,token)){res.status(403).json({error:'Invitation invalide, expirée ou révoquée.'});return;}
+  res.cookie('invitation',token,{httpOnly:true,sameSite:'strict',secure:config.production,maxAge:3600000,path:'/'});
+  res.json({ok:true});
+ });
+ const currentUser=(req:express.Request)=>db.prepare('SELECT u.id,u.username FROM sessions s JOIN users u ON u.id=s.user_id JOIN site_access a ON a.user_id=u.id AND a.allowed=1 WHERE s.token=? AND s.expires>?').get(digest(sessionToken(req)),Date.now());
  for(const action of ['register','login'])app.post(`/api/auth/${action}`,authLimiter,async(req,res)=>{
+  const invitation=action==='register'?validInvitation(db,inviteToken(req)||String(req.body?.invitation??'')):undefined;
+  if(action==='register'&&!invitation){res.status(403).json({error:'Invitation requise ou invalide.'});return;}
   const {username,password}=credentials.parse(req.body);
   let user=db.prepare('SELECT * FROM users WHERE username=?').get(username) as any;
   if(action==='register'){
    if(user){res.status(409).json({error:'Ce pseudonyme est déjà utilisé.'});return;}
    const passwordHash=await hash(password,12);
    user={id:randomUUID(),username};
-   try{db.prepare('INSERT INTO users VALUES (?,?,?)').run(user.id,username,passwordHash);}catch{res.status(409).json({error:'Ce pseudonyme est déjà utilisé.'});return;}
+   try{transaction(db,()=>{
+    if(!validInvitation(db,inviteToken(req)||String(req.body?.invitation??'')))throw new Error('Invitation indisponible');
+    db.prepare('INSERT INTO users VALUES (?,?,?)').run(user.id,username,passwordHash);
+    db.prepare('INSERT INTO site_access VALUES (?,1)').run(user.id);
+    db.prepare('UPDATE invitations SET used_by=? WHERE id=?').run(user.id,invitation!.id);
+   });}catch{res.status(409).json({error:'Inscription impossible : pseudonyme ou invitation indisponible.'});return;}
+   res.clearCookie('invitation',{path:'/'});
   }else if(!await compare(password,user?.password??'$2b$12$7iWRquaoMRKoBIEqP77hGOfsgagV79COapVIltNp/xAOPW2FL7Bze') || !user){res.status(401).json({error:'Identifiants incorrects.'});return;}
+  if(!db.prepare('SELECT user_id FROM site_access WHERE user_id=? AND allowed=1').get(user.id)){res.status(403).json({error:'Accès non autorisé.'});return;}
   const token=randomBytes(32).toString('hex');
   db.prepare('DELETE FROM sessions WHERE expires<?').run(Date.now());
   db.prepare('INSERT INTO sessions VALUES (?,?,?)').run(digest(token),user.id,Date.now()+7*86400000);
-  res.cookie('session',token,{httpOnly:true,sameSite:'strict',secure:process.env.NODE_ENV==='production',maxAge:7*86400000,path:'/'});
+  res.cookie('session',token,{httpOnly:true,sameSite:'strict',secure:config.production,maxAge:7*86400000,path:'/'});
   res.json({id:user.id,username:user.username});
  });
  app.use('/api',(req,res,next)=>{
-  const session=db.prepare('SELECT u.id,u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires>?').get(digest(sessionToken(req)),Date.now());
+  const session=currentUser(req);
   if(!session){res.status(401).json({error:'Connectez-vous pour continuer.'});return;}
   res.locals.user=session;next();
  });
@@ -194,7 +215,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   const counts=db.prepare('SELECT count(*) AS n,coalesce(sum(dc.quantity),0) AS quantity '+from).get(...args);
   res.json({cards:await translate(cards as unknown as Card[]),total:counts?.n,quantity:counts?.quantity});
  });
- for(const target of ['decks','collection'] as const)app.post(`/api/${target}/import`,async(req,res)=>{
+ for(const target of ['decks','collection','wishlist'] as const)app.post(`/api/${target}/import`,async(req,res)=>{
   const input=z.object({name:z.string().trim().max(100).optional(),deckId:z.string().optional(),text:z.string().min(1),format:z.enum(['auto','text','csv']).default('auto')}).parse(req.body);
   if(Buffer.byteLength(input.text,'utf8')>MAX_IMPORT_BYTES){res.status(413).json({error:'Oups, cette liste dépasse 10 Mo ! Choisis un fichier plus léger.'});return;}
   const userId=res.locals.user.id,startGeneration=generation(res.locals.user.id);
@@ -244,17 +265,17 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   if(generation(userId)!==startGeneration){if(stream){emit({type:'error',error:'Le compte a été remis à zéro : import annulé.'});res.end();}else res.status(409).json({error:'Le compte a été remis à zéro : import annulé.'});return;}
   const id=input.deckId??randomUUID();let imported=0;
   const collectionTotals=new Map<string,number>();
-  if(target==='collection')for(const c of db.prepare('SELECT oracle_id,quantity FROM collection WHERE user_id=?').all(userId))collectionTotals.set(String(c.oracle_id),Number(c.quantity));
-  const addCollection=db.prepare('INSERT INTO collection VALUES (?,?,?) ON CONFLICT(user_id,oracle_id) DO UPDATE SET quantity=quantity+excluded.quantity');
+  if(target!=='decks')for(const c of db.prepare(`SELECT oracle_id,quantity FROM ${target} WHERE user_id=?`).all(userId))collectionTotals.set(String(c.oracle_id),Number(c.quantity));
+  const addCollection=db.prepare(`INSERT INTO ${target==='wishlist'?'wishlist':'collection'} VALUES (?,?,?) ON CONFLICT(user_id,oracle_id) DO UPDATE SET quantity=quantity+excluded.quantity`);
   const addDeck=db.prepare('INSERT INTO deck_cards(deck_id,oracle_id,section,quantity,set_code,collector_number,foil,raw_line,finish,language,condition,scryfall_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
   const addEntry=db.prepare('INSERT INTO collection_entries(user_id,oracle_id,quantity,set_code,collector_number,foil,finish,language,condition,scryfall_id) VALUES (?,?,?,?,?,?,?,?,?,?)');
   transaction(db,()=>{
    for(const r of resolved){
-    if(target==='collection'){
+    if(target!=='decks'){
      const total=(collectionTotals.get(r.card.oracle_id)??0)+r.quantity;
-     if(total>9999){errors.push({line:r.line,section:r.section,text:r.text,message:'Le total dépasse 9999 exemplaires dans la collection.',retryText:parsed.format==='csv'?r.csv_record??r.text:`${r.section}\n${r.text}`});continue;}
+     if(total>9999){errors.push({line:r.line,section:r.section,text:r.text,message:`Le total dépasse 9999 exemplaires dans la ${target==='wishlist'?'wishlist':'collection'}.`,retryText:parsed.format==='csv'?r.csv_record??r.text:`${r.section}\n${r.text}`});continue;}
      addCollection.run(userId,r.card.oracle_id,r.quantity);collectionTotals.set(r.card.oracle_id,total);
-     if(r.set_code||r.scryfall_id)addEntry.run(userId,r.card.oracle_id,r.quantity,r.set_code,r.collector_number,Number(r.foil),r.finish??(r.foil?'foil':'nonfoil'),r.language??null,r.condition??null,r.scryfall_id??null);
+     if(target==='collection'&&(r.set_code||r.scryfall_id))addEntry.run(userId,r.card.oracle_id,r.quantity,r.set_code,r.collector_number,Number(r.foil),r.finish??(r.foil?'foil':'nonfoil'),r.language??null,r.condition??null,r.scryfall_id??null);
     }else{
      if(!imported && !input.deckId)db.prepare('INSERT INTO decks(id,user_id,name) VALUES (?,?,?)').run(id,userId,input.name!);
      addDeck.run(id,r.card.oracle_id,r.section,r.quantity,r.set_code,r.collector_number,Number(r.foil),r.raw_line,r.finish??(r.foil?'foil':'nonfoil'),r.language??null,r.condition??null,r.scryfall_id??null);
@@ -288,7 +309,19 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   if(error instanceof z.ZodError){res.status(400).json({error:'Données invalides.',details:error.issues});return;}
   if(error?.type==='entity.too.large'){res.status(413).json({error:'Oups, ce fichier est trop gros : maximum 10 Mo pour la decklist.'});return;}
   if(error?.type==='entity.parse.failed'){res.status(400).json({error:'Le texte envoyé est illisible. Réessaie.'});return;}
-  console.error(error);res.status(500).json({error:'La requête a échoué. Réessayez.'});
+  console.error('Erreur interne du serveur.');res.status(500).json({error:'La requête a échoué. Réessayez.'});
+ });
+ // Gate every document before the production static server or Vite middleware.
+ app.use((req,res,next)=>{
+  res.set('Cache-Control','no-store');
+  if(req.path==='/login'||/^\/(assets\/|src\/|@|node_modules\/)/.test(req.path)||req.path==='/vite.svg'){next();return;}
+  if(req.path==='/register'){
+   if(validInvitation(db,inviteToken(req))){next();return;}
+   res.status(403).type('text').send('Invitation requise. Rendez-vous sur /login.');return;
+  }
+  if(currentUser(req)){next();return;}
+  if(req.path==='/'){res.redirect('/login');return;}
+  res.status(403).type('text').send('Accès privé. Connectez-vous sur /login.');
  });
  return app;
 }

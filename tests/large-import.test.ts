@@ -1,3 +1,4 @@
+import {createInvitation} from '../src/server/access';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
@@ -13,7 +14,7 @@ test('30,000 lines use two Scryfall batches, stream progress and preserve export
  };
  try{
   const app=createApp(db);const agent=request.agent(app);
-  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({username:'bigdeck',password:'correct horse battery'}).expect(200);
+  await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'bigdeck',password:'correct horse battery'}).expect(200);
   const text='Deck\n'+Array.from({length:30000},(_,i)=>`${i%2?'1x':'1'} Card ${i%150}${i%3?'':' (TST) 42 *F'}`).join('\n')+'\n';
   assert.ok(Buffer.byteLength(text)<1024*1024);
   const start=performance.now();
@@ -26,7 +27,7 @@ test('30,000 lines use two Scryfall batches, stream progress and preserve export
   const exported=await agent.get(`/api/decks/${result.id}/export`).expect(200);assert.equal(exported.text,text);
   const summary=await agent.get('/api/decks?summary=1').expect(200);assert.equal(summary.body[0].card_count,30000);assert.ok(!('cards' in summary.body[0]));
   const page=await agent.get(`/api/decks/${result.id}/cards?offset=29900`).expect(200);assert.equal(page.body.cards.length,100);assert.equal(page.body.total,30000);
-  const outsider=request.agent(app);await outsider.post('/api/auth/register').set('X-Mana-Request','1').send({username:'outside',password:'correct horse battery'}).expect(200);
+  const outsider=request.agent(app);await outsider.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'outside',password:'correct horse battery'}).expect(200);
   await outsider.get(`/api/decks/${result.id}/cards?offset=0`).expect(404);
   const repeated=await agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'6000 lines',text:'1 Card 0\n'.repeat(6000)}).expect(201);
   assert.equal(repeated.body.imported,6000);assert.equal(calls,2); // Entirely cached.

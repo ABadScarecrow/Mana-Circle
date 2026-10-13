@@ -1,3 +1,4 @@
+import {createInvitation} from '../src/server/access';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
@@ -9,12 +10,12 @@ test('auth, privacy, partial imports and idempotent missing-card additions',asyn
  const app=createApp(db,resolve);const alice=request.agent(app),bob=request.agent(app);
  const send=(agent:typeof alice,path:string,body:object)=>agent.post(path).set('X-Mana-Request','1').send(body);
  await request(app).get('/api/matches').expect(401);
- await send(alice,'/api/auth/register',{username:'alice',password:'correct horse battery'}).expect(200);
- await send(bob,'/api/auth/register',{username:'bobby',password:'correct horse battery'}).expect(200);
+ await send(alice,'/api/auth/register',{invitation:createInvitation(db,'test').token,username:'alice',password:'correct horse battery'}).expect(200);
+ await send(bob,'/api/auth/register',{invitation:createInvitation(db,'test').token,username:'bobby',password:'correct horse battery'}).expect(200);
  await alice.put('/api/wishlist').set('X-Mana-Request','1').send({name:'Lightning Bolt',quantity:4}).expect(200);
  await bob.put('/api/collection').set('X-Mana-Request','1').send({name:'Lightning Bolt',quantity:3}).expect(200);
  assert.equal((await alice.get('/api/matches')).body.receive.length,0);
- await send(alice,'/api/friends',{username:'bobby'}).expect(201);
+ await send(alice,'/api/friends',{invitation:createInvitation(db,'test').token,username:'bobby'}).expect(201);
  const relation=(await bob.get('/api/friends')).body[0];
  await alice.patch('/api/friends/'+relation.id).set('X-Mana-Request','1').send({action:'accept'}).expect(404);
  assert.equal((await alice.get('/api/matches')).body.receive.length,0);

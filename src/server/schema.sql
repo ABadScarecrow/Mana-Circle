@@ -39,3 +39,11 @@ CREATE TABLE IF NOT EXISTS collection_entries (
  FOREIGN KEY(user_id,oracle_id) REFERENCES collection(user_id,oracle_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS collection_entries_user ON collection_entries(user_id,oracle_id);
+CREATE TABLE IF NOT EXISTS invitations (
+ id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, label TEXT NOT NULL,
+ expires INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0,
+ used_by TEXT REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS site_access (
+ user_id TEXT PRIMARY KEY REFERENCES users(id), allowed INTEGER NOT NULL DEFAULT 0
+);

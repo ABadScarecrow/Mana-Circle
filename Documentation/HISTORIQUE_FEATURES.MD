@@ -107,3 +107,19 @@ Ce document reprend les demandes de cette conversation et les fonctionnalités e
 - Catalogues publics ManaPool/CardKingdom et taux mis en cache 24 h, requêtes concurrentes mutualisées ; échecs réessayés après une minute, données de repli anciennes exclues après sept jours. Aucun téléchargement par ligne et aucune clé API supplémentaire. L’API directe TCGplayer n’octroyant plus de nouveaux accès, ses cotations sont obtenues via Scryfall.
 - Tests de conversion, médiane, identité/finition, données absentes, cache, concurrence, priorité Cardmarket, cotation à zéro, prix hors limites, tri avant pagination, totaux complets et révision des éditions à quantité identique. Tests d’import/export, CSV 10 Mo et 30 000 lignes maintenus.
 - Sources vérifiées : [ManaPool OpenAPI](https://manapool.com/api/docs/v1/openapi.json), [CardKingdom catalogue public](https://api.cardkingdom.com/api/v2/pricelist), [Frankfurter](https://frankfurter.dev/), [accès TCGplayer](https://docs.tcgplayer.com/docs/getting-started).
+
+
+## Import de masse des wishlists et correction des noms (13 octobre 2026)
+
+- Import texte ou CSV ManaBox dans les wishlists, avec progression, addition des quantités, limite de 9999 exemplaires par carte et conservation des lignes à corriger.
+- Les détails affichés sont liés à la carte, à son édition et au foil sélectionnés. Cliquer sur une carte de collection après une recherche ne réutilise plus la traduction française de la carte précédente dans le cache.
+- Les noms français restent prioritaires quand une traduction Scryfall existe ; les identités et les exports conservent leurs noms canoniques.
+- Tests de régression pour la sélection et l’import wishlist (doublons, CSV, isolation des comptes, erreurs et dépassement de quantité).
+
+
+## Tests renforcés, code inutilisé et responsive (13 octobre 2026)
+
+- Suites API par destination d’import : entrées invalides, protections CSRF, correction sans duplication et annulation après remise à zéro, en JSON et streaming.
+- Suites Playwright sur quatre tailles d’écran : navigation, noms longs, listes et dialogues, recherche puis collection, import partiel et connexion/inscription.
+- Suppression des imports et du paramètre inutilisés, des styles de l’ancien panneau de valorisation et de l’ancienne liste de versions. Contrôles TypeScript permanents sur le code inutilisé.
+- Correction des débordements sur mobile, contrôles tactiles, formulaires flexibles et volet de carte fixe en bas de l’écran.

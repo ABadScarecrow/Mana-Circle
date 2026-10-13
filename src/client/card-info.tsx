@@ -1,5 +1,6 @@
 import {FrenchNamesProvider,CardName} from './french-names';
 import {CardPricesProvider} from './card-prices';
+import {cardDetailsScope,matchingCardDetails} from './selected-card';
 import {displayName} from '../shared/card-name';
 import React,{createContext,useContext,useEffect,useRef,useState} from 'react';
 type Selected={oracle_id:string;name:string;image:string|null;fr_name?:string|null;set_code?:string|null;collector_number?:string|null;foil?:number};
@@ -8,14 +9,16 @@ const CardInfo=createContext<(card:Selected)=>void>(()=>{});
 export const useCardInfo=()=>useContext(CardInfo);
 const money=(value:number|null|undefined)=>value==null?'—':new Intl.NumberFormat('fr-FR',{style:'currency',currency:'EUR'}).format(value);
 export function CardInfoProvider({children,request}:{children:React.ReactNode;request:Request}){
- const [card,setCard]=useState<Selected|null>(null),[data,setData]=useState<any>(null),[loading,setLoading]=useState(false),[error,setError]=useState(''),[foil,setFoil]=useState(false),[version,setVersion]=useState(''),[retry,setRetry]=useState(0),[imageFailed,setImageFailed]=useState(false);
+ const [card,setCard]=useState<Selected|null>(null),[details,setDetails]=useState<{scope:string;value:any}|null>(null),[loading,setLoading]=useState(false),[error,setError]=useState(''),[foil,setFoil]=useState(false),[version,setVersion]=useState(''),[retry,setRetry]=useState(0),[imageFailed,setImageFailed]=useState(false);
  const selectionScope=useRef('');
+ const scope=card?cardDetailsScope(card,foil):'';
+ const data=matchingCardDetails(scope,details);
  function inspect(next:Selected){setCard(current=>current?.oracle_id===next.oracle_id&&current.set_code===next.set_code&&current.collector_number===next.collector_number&&current.foil===next.foil&&current.fr_name===next.fr_name?current:next);setFoil(!!next.foil);}
  useEffect(()=>{
   if(!card)return;const controller=new AbortController();let active=true;
-  setLoading(true);setError('');setData(null);
+  setLoading(true);setError('');setDetails(null);
   const timer=setTimeout(()=>{request(`/cards/${card.oracle_id}/details?foil=${foil?1:0}`,'GET',undefined,controller.signal).then(result=>{
-   if(!active)return;setData(result);const scope=JSON.stringify([card.oracle_id,card.set_code,card.collector_number]),preserve=selectionScope.current===scope;selectionScope.current=scope;setVersion(previous=>preserve&&result.versions.some((v:any)=>v.id===previous)?previous:result.versions.find((v:any)=>v.set_code===card.set_code?.toLowerCase()&&v.collector_number===card.collector_number)?.id??result.versions[0]?.id??'');
+   if(!active)return;setDetails({scope,value:result});const editionScope=JSON.stringify([card.oracle_id,card.set_code,card.collector_number]),preserve=selectionScope.current===editionScope;selectionScope.current=editionScope;setVersion(previous=>preserve&&result.versions.some((v:any)=>v.id===previous)?previous:result.versions.find((v:any)=>v.set_code===card.set_code?.toLowerCase()&&v.collector_number===card.collector_number)?.id??result.versions[0]?.id??'');
   }).catch(e=>{if(active)setError(e.message);}).finally(()=>{if(active)setLoading(false);});},250);
   return()=>{active=false;clearTimeout(timer);controller.abort();};
  },[card?.oracle_id,card?.set_code,card?.collector_number,foil,retry,request]);
