@@ -28,3 +28,15 @@ export function marketPrices(){
   return {versions:priced,summary:summarizePrices(priced),updated_at:updatedAt,warning,foil};
  };
 }
+
+// Edition browsing remains usable when pricing providers are slow or unavailable.
+export async function previewPrices(load:()=>ReturnType<ReturnType<typeof marketPrices>>,versions:any[],foil=false,maxWaitMs=5000){
+ let timer:ReturnType<typeof setTimeout>|undefined;
+ try{return await Promise.race([load(),new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(new Error('Prix trop lents')),maxWaitMs);})]);}
+ catch{
+  const priced=versions.map(version=>{const raw=foil?version.eur_foil:version.eur;const amount=raw!=null&&String(raw).trim()!==''&&Number.isFinite(Number(raw))&&Number(raw)>=0?Number(raw):null;
+   return {...version,price:{low:null,average:amount,high:null,source:amount==null?null:'Scryfall (Cardmarket)',estimated:true,currency:'EUR'}};
+  });
+  return {versions:priced,summary:summarizePrices(priced),updated_at:null,warning:'Les prix sont momentanément indisponibles ou trop lents. Les versions restent consultables avec les repères EUR Scryfall disponibles.',foil};
+ }finally{if(timer)clearTimeout(timer);}
+}

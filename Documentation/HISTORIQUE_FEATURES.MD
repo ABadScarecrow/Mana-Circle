@@ -123,3 +123,27 @@ Ce document reprend les demandes de cette conversation et les fonctionnalités e
 - Suites Playwright sur quatre tailles d’écran : navigation, noms longs, listes et dialogues, recherche puis collection, import partiel et connexion/inscription.
 - Suppression des imports et du paramètre inutilisés, des styles de l’ancien panneau de valorisation et de l’ancienne liste de versions. Contrôles TypeScript permanents sur le code inutilisé.
 - Correction des débordements sur mobile, contrôles tactiles, formulaires flexibles et volet de carte fixe en bas de l’écran.
+
+
+## Consultation des listes des amis (13 octobre 2026)
+
+- Bouton « Voir les listes » pour les amis acceptés : collection, wishlist et decks en lecture seule, recherche par nom et pagination de 100 cartes/lignes.
+- Consultation d’un deck avec sections, quantités, éditions et finitions, aperçus et détails de cartes existants.
+- Contrôle serveur de session, d’amitié acceptée, d’accès du compte consulté et de propriété du deck. Suppression d’amitié ou révocation du compte ferme les nouvelles requêtes ; la vue se rafraîchit et masque les données en cas de refus.
+- Tests API des accès directs, demandes en attente, pagination, isolation des decks, écritures interdites et révocation ; tests navigateur sur les quatre tailles d’écran, avec captures de la vue.
+
+
+## Barres de recherche visibles (13 octobre 2026)
+
+- Recherche compacte directement visible pour les decks, collections et wishlists, ainsi que pour les cartes d’un deck ouvert.
+- Filtrage par nom, sans distinction de casse ou d’accent ; remise à la première page pour les cartes et retour à la liste complète quand le champ est vidé.
+- Recherche également sur les noms des decks des amis, en plus des cartes de leurs bibliothèques.
+- Tests navigateur du filtrage, des résultats vides et de la réinitialisation ; test API du filtre sur les noms des decks d’un ami.
+
+
+## Vues partagées, recherche avancée et Cardmarket (13 octobre 2026)
+
+- Affichage des collections réutilisé dans Échanges et les bibliothèques d’amis, avec vues Cartes/Liste, aperçus, détails, prix et taille réglable. Les informations d’échange et la lecture seule sont conservées.
+- Formulaire et construction de critères Scryfall communs à toutes les listes de cartes ; placeholders courts adaptés aux types réellement acceptés. Filtrage des listes paginées avant pagination, contrôle d’amitié maintenu.
+- Les critères d’impression du catalogue portent sur une version disponible de la carte Oracle ; les critères locaux d’édition possédée restent distincts.
+- Lien Cardmarket sous les noms de la carte, avant l’image, en texte discret de 12 px et cible de 36 px minimum, avec destination de la version sélectionnée inchangée.

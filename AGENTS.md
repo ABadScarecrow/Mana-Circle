@@ -31,3 +31,6 @@ Pull requests should explain the change, its purpose, and validation performed. 
 Never commit credentials, tokens, or private configuration. Provide placeholder values in example configuration files and document required environment variables when configuration is introduced.
 
 Private access administration lives in `src/server/access.ts`, `config.ts`, and `admin.ts`. `npm run admin --` manages invitations, access grants, revocation, and coherent SQLite backups; see README.md.
+
+Read-only friend libraries are implemented in `src/server/friend-library.ts` and `src/client/friend-library.tsx`, with API authorization tests in `tests/friend-library.test.ts`.
+Shared collection rendering lives in `InventoryCards` in `src/client/cards.tsx`; advanced criteria fields live in `src/client/list-tools.tsx`. Scoped catalogue filtering uses `src/server/catalog-filter.ts` and is covered by `tests/catalog-filter.test.ts`.

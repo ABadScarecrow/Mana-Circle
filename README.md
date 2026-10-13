@@ -131,6 +131,31 @@ Connexion, inscription et validation d’invitation partagent une limite de 25 r
 
 Le démarrage de production refuse une origine absente, HTTP, avec chemin, un proxy non explicitement configuré ou une écoute hors boucle locale. Le mode développement (`npm run dev`, puis invitation via admin) est pour les essais locaux uniquement et utilise des cookies sans Secure. Ne jamais publier le serveur de développement.
 
+## Rechercher dans ses listes
+
+Une petite barre de recherche reste visible dans **Decks**, **Collection** et **Wishlist**. Elle filtre immédiatement les decks par leur nom, ou les cartes par leur nom français/anglais, sans ouvrir un outil. Dans un deck ouvert, **Rechercher dans ce deck** filtre ses cartes avant pagination. Vider la recherche réaffiche la liste. Les recherches ignorent la casse et les accents.
+
+## Recherche avancée dans les listes
+
+**Recherche avancée** utilise le même formulaire et les mêmes critères Scryfall dans Recherche, Collection, Wishlist, Échanges, les decks et les bibliothèques d’amis. Dans les listes, seuls les identifiants Oracle déjà présents sont conservés ; dans une liste de decks, un deck reste visible s’il contient une carte correspondant aux critères. Le filtrage des cartes paginées se fait avant pagination. **Tout effacer** restaure la liste. Les champs donnent des exemples de format (comparaison numérique, coût de mana, date ISO, UUID, etc.).
+
+Les critères d’extension, de date, de langue et de prix EUR concernent une version disponible dans le catalogue Scryfall, même si la collection est regroupée par Oracle ID. Ils ne signifient pas que cette impression précise est possédée. Les filtres d’édition enregistrée des decks et les filtres de valeur AVG Cardmarket restent distincts. Les résultats dépendent de Scryfall ; une erreur de réseau est affichée. Le serveur limite la recherche aux cartes concernées et réutilise les mêmes résultats pendant une minute pour les rafraîchissements.
+
+## Consulter les listes des amis
+
+Dans **Amis**, accepter la demande d’amitié puis cliquer sur **Voir les listes**. Les cartes d’Échanges et des bibliothèques d’amis réutilisent l’affichage des collections (vues Cartes/Liste, taille, aperçus, prix et détails). Les listes des amis restent en lecture seule. La bibliothèque affiche la **collection**, la **wishlist** et les **decks** de cet ami. La liste des decks dispose aussi d’une recherche par nom. Choisir **Consulter le deck** pour voir ses cartes, sections, quantités et éditions. La recherche accepte les noms anglais et les traductions françaises déjà mises en cache ; les cartes sont affichées avec leurs traductions disponibles. Les listes de cartes sont paginées par 100 éléments.
+
+La consultation est réciproque dès que l’amitié est acceptée et reste en lecture seule : aucun ajout, retrait, import ou changement de deck de l’ami. Supprimer l’amitié ferme l’accès aux prochaines requêtes. Le compte consulté doit encore être autorisé sur le site ; une demande en attente ou un simple identifiant connu ne donne aucun accès. La vue ouverte se rafraîchit toutes les cinq secondes et masque les données en cas de refus. Des informations déjà reçues ne peuvent pas être retirées du navigateur d’un destinataire.
+
+Les API de lecture, sous `/api`, sont :
+
+- `GET /friends/:userId/collection?offset=0&name=…`
+- `GET /friends/:userId/wishlist?offset=0&name=…`
+- `GET /friends/:userId/decks?name=…`
+- `GET /friends/:userId/decks/:deckId/cards?offset=0&name=…`
+
+Chaque requête exige une session autorisée et une amitié acceptée. Le deck doit appartenir à l’ami indiqué. Les réponses ne contiennent ni mot de passe ni session. Ces routes ne permettent aucune écriture. Les objectifs, imports, exports et changements de ses propres listes restent disponibles dans leurs sections habituelles.
+
 ## Importer et exporter ses decks
 
 Dans **Decks**, coller une liste ou choisir un fichier texte UTF-8 ou CSV ManaBox. La limite est **10 Mo = 10 485 760 octets**, contrôlée dans le navigateur et sur le serveur, y compris pour du texte collé. Les cartes sont validées par Scryfall et mises en cache localement.

@@ -1,17 +1,10 @@
 import type { DatabaseSync } from 'node:sqlite';
 import {transaction} from './db';
 import {normalizeName} from '../shared/card-name';
-import {levenshtein,rankCandidates} from '../shared/levenshtein';
+import {nameDistance,rankCandidates} from '../shared/levenshtein';
+import {scryfallClient,ScryfallError} from './scryfall-client';
 export type Card={oracle_id:string;name:string;image:string|null;type_line:string;fr_name?:string|null};
-let queue:Promise<unknown>=Promise.resolve();
-async function request(path:string,body?:unknown){
- const job=queue.then(async()=>{
-  await new Promise(r=>setTimeout(r,110));
-  const response=await fetch(`https://api.scryfall.com${path}`,{method:body?'POST':'GET',body:body?JSON.stringify(body):undefined,headers:{'User-Agent':'ManaCircle/1.0','Accept':'application/json','Content-Type':'application/json'},signal:AbortSignal.timeout(10000)});
-  if(!response.ok)throw new Error(response.status===404?'Carte inconnue ou ambiguë. Choisissez un nom exact dans la recherche.':'Scryfall indisponible. Réessayez plus tard.');
-  return response.json();
- });queue=job.catch(()=>{});return job;
-}
+const request=scryfallClient();
 function printedFrenchName(data:any):string|null {return data.printed_name??(data.card_faces?.every((f:any)=>f.printed_name)?data.card_faces.map((f:any)=>f.printed_name).join(' // '):null);}
 export function save(db:DatabaseSync,data:any):Card{
  if(!data.oracle_id)throw new Error('Cette entrée ne possède pas d’identifiant Oracle.');
@@ -37,39 +30,58 @@ export function resolver(db:DatabaseSync){return async(name:string):Promise<Card
  db.prepare('INSERT OR REPLACE INTO card_names VALUES (?,?)').run(name,card.oracle_id);return card;
 };}
 export function searchCards(db:DatabaseSync){
- const cache=new Map<string,{expires:number;cards:Card[]}>();
- const pending=new Map<string,Promise<Card[]>>();const translate=localizer(db);
+ const cache=new Map<string,{expires:number;cards:Card[]}>(),pending=new Map<string,Promise<Card[]>>();const translate=localizer(db);
+ const known=db.prepare('SELECT c.*,l.fr_name FROM cards c LEFT JOIN card_localizations l USING(oracle_id)');
+ const score=(query:string,card:Card)=>Math.min(nameDistance(query,card.name),card.fr_name?nameDistance(query,card.fr_name):Infinity);
  return async(query:string):Promise<Card[]>=>{
-  const key=query.trim().toLowerCase();if(key.length<2)return [];
-  const hit=cache.get(key);if(hit && hit.expires>Date.now())return hit.cards;
+  const key=normalizeName(query).replace(/\s+/g,' ');if(key.length<2)return [];
+  const hit=cache.get(key);if(hit&&hit.expires>Date.now())return hit.cards;
   if(pending.has(key))return pending.get(key)!;
   const job=(async()=>{
-   const data=await request(`/cards/autocomplete?q=${encodeURIComponent(key)}`);
-   let names:string[]=data.data??[];
-   let cards:Card[]=[];
-   if(names.length){
-    names=rankCandidates(query,names.map(name=>({name}))).slice(0,8).map(c=>c.name);
-    // One search yields images for all exact candidate names, rather than one request per suggestion.
-    const expression=names.map(name=>`!"${name.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"`).join(' or ');
-    const result=await request(`/cards/search?q=${encodeURIComponent(expression)}&unique=cards`);
-    const allowed=new Set(names.map(name=>name.toLowerCase()));
-    cards=(result.data??[]).filter((c:any)=>c.oracle_id && allowed.has(c.name.toLowerCase())).map((c:any)=>save(db,c));
-   }else{
-    try{cards=[save(db,await request(`/cards/named?fuzzy=${encodeURIComponent(key)}`))];}
-    catch(e){if(!(e as Error).message.startsWith('Carte inconnue'))throw e;}
+   const local=rankCandidates(query,known.all() as unknown as Card[]).filter(card=>score(query,card)<=0.6).slice(0,8);
+   if(local.some(card=>score(query,card)===0)){cache.set(key,{expires:Date.now()+300000,cards:local});return local;}
+   let cards:Card[]=[],failure:unknown;
+   try{
+    const data=await request(`/cards/autocomplete?q=${encodeURIComponent(key)}`);
+    if(!Array.isArray(data.data))throw new ScryfallError('Suggestions Scryfall illisibles.',502);
+    const names=rankCandidates(query,data.data.filter((name:unknown)=>typeof name==='string').map((name:string)=>({name}))).slice(0,8).map(card=>card.name);
+    if(names.length){
+     const expression=names.map(name=>`!"${name.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"`).join(' or ');
+     const result=await request(`/cards/search?q=${encodeURIComponent(expression)}&unique=cards`),allowed=new Set(names.map(name=>name.toLowerCase()));
+     if(!Array.isArray(result.data))throw new ScryfallError('Suggestions Scryfall illisibles.',502);
+     cards=result.data.filter((card:any)=>card.oracle_id&&typeof card.name==='string'&&allowed.has(card.name.toLowerCase())).map((card:any)=>save(db,card));
+    }else{
+     try{cards=[save(db,await request(`/cards/named?fuzzy=${encodeURIComponent(key)}`))];}catch(error){if(!(error instanceof ScryfallError&&error.status===404))throw error;}
+    }
+   }catch(error){failure=error;}
+   // A useful English result doesn't need an additional French network lookup.
+   if(!failure&&(!cards.length||cards.every(card=>score(query,card)>0.3))){
+    const escaped=key.replace(/\\/g,'\\\\').replace(/"/g,'\\"');
+    try{
+     const result=await request('/cards/search?q='+encodeURIComponent(`lang:fr name:"${escaped}"`)+'&unique=cards');
+     if(!Array.isArray(result.data))throw new ScryfallError('Suggestions Scryfall illisibles.',502);
+     cards.push(...result.data.filter((card:any)=>card.oracle_id&&card.lang==='fr'&&printedFrenchName(card)).map((card:any)=>save(db,card)));
+    }catch(error){if(!(error instanceof ScryfallError&&error.status===404))failure=error;}
    }
-   let french:any[]=[];
-   const escaped=key.replace(/\\/g,'\\\\').replace(/"/g,'\\"');
-   try{const result=await request('/cards/search?q='+encodeURIComponent(`lang:fr name:"${escaped}"`)+'&unique=cards');french=(result.data??[]).filter((c:any)=>c.oracle_id&&c.lang==='fr'&&printedFrenchName(c));}
-   catch(e){if(!(e as Error).message.startsWith('Carte inconnue'))throw e;}
-   for(const item of french.slice(0,175))cards.push(save(db,item));
-   // An Oracle ID remains the identity, regardless of the language of the result.
-   const distinct=new Map<string,Card>();for(const card of cards){const old=distinct.get(card.oracle_id);distinct.set(card.oracle_id,{...old,...card,fr_name:card.fr_name??old?.fr_name});}
-   cards=await translate([...distinct.values()]);
-   const distance=(c:Card)=>Math.min(levenshtein(normalizeName(query),normalizeName(c.name)),c.fr_name?levenshtein(normalizeName(query),normalizeName(c.fr_name)):Infinity);
-   cards.sort((a,b)=>distance(a)-distance(b)||a.name.localeCompare(b.name));cards=cards.slice(0,8);
+   // One bounded prefix search recovers ambiguous fuzzy names and uncached typos.
+   if(!failure&&!cards.length&&!local.length&&key.length>=4&&key.length<=80){
+    const token=key.split(/[^\p{L}\p{N}]+/u).sort((left,right)=>right.length-left.length)[0];
+    if(token?.length>=4){
+     const prefixes=[...new Set([token.slice(0,4),...Array.from({length:Math.min(token.length,5)},(_,index)=>(token.slice(0,index)+token.slice(index+1)).slice(0,4))])].filter(prefix=>prefix.length>=3);
+     const expression=prefixes.map(prefix=>`name:"${prefix}"`).join(' or ');
+     try{const result=await request('/cards/search?q='+encodeURIComponent(expression)+'&unique=cards&include_multilingual=true');
+      if(!Array.isArray(result.data))throw new ScryfallError('Suggestions Scryfall illisibles.',502);
+      cards.push(...result.data.filter((card:any)=>card.oracle_id&&typeof card.name==='string').map((card:any)=>save(db,card)).filter((card:Card)=>score(query,card)<=0.6));
+     }catch(error){if(!(error instanceof ScryfallError&&error.status===404))failure=error;}
+    }
+   }
+   const distinct=new Map<string,Card>();for(const card of [...local,...cards]){const old=distinct.get(card.oracle_id);distinct.set(card.oracle_id,{...old,...card,fr_name:card.fr_name??old?.fr_name});}
+   if(!distinct.size&&failure)throw failure;
+   const ranked=rankCandidates(query,[...distinct.values()]).slice(0,8);
+   const result=rankCandidates(query,await translate(ranked)).slice(0,8);
    if(cache.size>=100)cache.delete(cache.keys().next().value!);
-   cache.set(key,{expires:Date.now()+300000,cards});return cards;
+   // A network outage is not cached as an empty successful search.
+   cache.set(key,{expires:Date.now()+(failure?15000:300000),cards:result});return result;
   })();pending.set(key,job);try{return await job;}finally{pending.delete(key);}
  };
 }
@@ -93,16 +105,40 @@ export function batchResolver(db:DatabaseSync){return async(names:string[],progr
  }
  return results;
 };}
-export function printingDetails(){
- const cache=new Map<string,{expires:number;value:any}>();const pending=new Map<string,Promise<any>>();
+export function printingDetails(db?:DatabaseSync){
+ const cache=new Map<string,{expires:number;value:any}>(),pending=new Map<string,Promise<any>>();
+ const stored=(id:string)=>db?db.prepare('SELECT data FROM card_printings WHERE oracle_id=? ORDER BY released_at DESC').all(id).flatMap(row=>{try{const data=JSON.parse(String(row.data));return data.oracle_id===id&&typeof data.name==='string'?[data]:[];}catch{return [];}}):[];
+ const format=(oracleId:string,versions:any[],warning:string|null=null,stale=false)=>{
+  const first=versions[0];if(!first)throw new ScryfallError('Aucune version disponible pour cette carte.',404);
+  return {oracle_id:oracleId,name:first.name,type_line:first.type_line??'',oracle_text:first.oracle_text??first.card_faces?.map((face:any)=>face.oracle_text??'').join('\n')??'',mana_cost:first.mana_cost??'',warning,stale,checked_at:Date.now(),versions:versions.map(v=>({id:v.id,oracle_id:v.oracle_id,name:v.name,image:v.image_uris?.normal??v.card_faces?.[0]?.image_uris?.normal??null,set_code:v.set??'',set_name:v.set_name??v.set??'',collector_number:v.collector_number??'',released_at:v.released_at??'',rarity:v.rarity,finishes:v.finishes??[],cardmarket_id:v.cardmarket_id??null,url:v.purchase_uris?.cardmarket??null,usd:v.prices?.usd??null,usd_foil:v.prices?.usd_foil??null,usd_etched:v.prices?.usd_etched??null,eur:v.prices?.eur??null,eur_foil:v.prices?.eur_foil??null,prices_checked_at:v.prices_checked_at??Date.now()}))};
+ };
  return async(oracleId:string)=>{
-  const hit=cache.get(oracleId);if(hit && hit.expires>Date.now())return hit.value;
+  const hit=cache.get(oracleId);if(hit&&hit.expires>Date.now())return hit.value;
   if(pending.has(oracleId))return pending.get(oracleId)!;
   const job=(async()=>{
-   const versions:any[]=[];let path='/cards/search?q='+encodeURIComponent(`oracleid:${oracleId}`)+'&unique=prints&order=released&dir=desc';
-   while(path){const data=await request(path);versions.push(...data.data);path=data.has_more?new URL(data.next_page).pathname+new URL(data.next_page).search:'';}
-   const first=versions[0];const value={oracle_id:oracleId,name:first.name,type_line:first.type_line,oracle_text:first.oracle_text??first.card_faces?.map((f:any)=>f.oracle_text).join('\n'),mana_cost:first.mana_cost??'',versions:versions.map(v=>({id:v.id,oracle_id:v.oracle_id,name:v.name,image:v.image_uris?.normal??v.card_faces?.[0]?.image_uris?.normal??null,set_code:v.set,set_name:v.set_name,collector_number:v.collector_number,released_at:v.released_at,rarity:v.rarity,finishes:v.finishes,cardmarket_id:v.cardmarket_id??null,url:v.purchase_uris?.cardmarket??null,usd:v.prices?.usd??null,usd_foil:v.prices?.usd_foil??null,usd_etched:v.prices?.usd_etched??null,eur:v.prices?.eur??null,eur_foil:v.prices?.eur_foil??null}))};
-   if(cache.size>=100)cache.delete(cache.keys().next().value!);cache.set(oracleId,{expires:Date.now()+3600000,value});return value;
+   const versions:any[]=[],visited=new Set<string>();
+   let path='/cards/search?q='+encodeURIComponent(`oracleid:${oracleId}`)+'&unique=prints&include_extras=true&order=released&dir=desc';
+   try{
+    while(path){
+     if(visited.has(path))throw new ScryfallError('Pagination Scryfall invalide.',502);visited.add(path);
+     const data=await request(path);
+     if(!Array.isArray(data.data))throw new ScryfallError('Liste de versions Scryfall illisible.',502);
+     versions.push(...data.data.filter((v:any)=>v.oracle_id===oracleId&&typeof v.name==='string'&&typeof v.id==='string'));
+     if(data.has_more){if(typeof data.next_page!=='string')throw new ScryfallError('Pagination Scryfall incomplète.',502);const next=new URL(data.next_page,'https://api.scryfall.com');if(next.origin!=='https://api.scryfall.com'||next.pathname!=='/cards/search')throw new ScryfallError('Pagination Scryfall invalide.',502);path=next.pathname+next.search;}else path='';
+    }
+    if(db&&versions.length)transaction(db,()=>{for(const version of versions)save(db,version);});
+    const value=format(oracleId,versions);
+    if(cache.size>=100)cache.delete(cache.keys().next().value!);cache.set(oracleId,{expires:Date.now()+3600000,value});return value;
+   }catch(error){
+    if(error instanceof ScryfallError&&[400,404].includes(error.status))throw error;
+    const snapshots=stored(oracleId),merged=new Map(snapshots.map(version=>[version.id,version]));for(const version of versions)merged.set(version.id,version);
+    if(merged.size){
+     const value=format(oracleId,[...merged.values()].sort((left,right)=>String(right.released_at??'').localeCompare(String(left.released_at??''))),`Scryfall indisponible : versions ${versions.length?'partiellement chargées et complétées depuis le cache':'conservées en cache'}, liste potentiellement incomplète.`,true);
+     cache.set(oracleId,{expires:Date.now()+60000,value});return value;
+    }
+    if(hit){const value={...hit.value,stale:true,warning:'Scryfall indisponible : dernières versions connues affichées.'};cache.set(oracleId,{expires:Date.now()+60000,value});return value;}
+    throw error;
+   }
   })();pending.set(oracleId,job);try{return await job;}finally{pending.delete(oracleId);}
  };
 }
@@ -139,9 +175,9 @@ export async function collectionPrintings(db:DatabaseSync,identifiers:any[]):Pro
  for(let offset=0;offset<identifiers.length;offset+=75){const data=await request('/cards/collection',{identifiers:identifiers.slice(offset,offset+75)});transaction(db,()=>{for(const item of data.data??[]){if(item.oracle_id){save(db,item);records.push(item);}}});}
  return records;
 }
-export function catalogSearch(db:DatabaseSync){const translate=localizer(db);return async(query:string,page:number)=>{
+export function catalogSearch(db:DatabaseSync){const translate=localizer(db);return async(query:string,page:number,unique:'prints'|'cards'='prints')=>{
  try{
-  const data=await request('/cards/search?q='+encodeURIComponent(query)+'&unique=prints&include_multilingual=true&page='+page);
+  const data=await request('/cards/search?q='+encodeURIComponent(query)+'&unique='+unique+'&include_multilingual=true&page='+page);
   const rows=(data.data??[]).filter((c:any)=>c.oracle_id).map((c:any)=>({...save(db,c),printing_id:c.id,set_code:c.set,collector_number:c.collector_number,released_at:c.released_at,rarity:c.rarity,colors:c.colors??[],cmc:c.cmc,artist:c.artist,finishes:c.finishes,language:c.lang}));
   return {cards:await translate(rows),total:data.total_cards??rows.length,has_more:!!data.has_more,page};
  }catch(e){if((e as Error).message.startsWith('Carte inconnue'))return {cards:[],total:0,has_more:false,page};throw e;}

@@ -8,6 +8,8 @@ import type { DatabaseSync } from 'node:sqlite';
 import { transaction } from './db';
 import {digest,validInvitation} from './access';
 import {configuration} from './config';
+import {friendLibrary} from './friend-library';
+import {catalogMatcher} from './catalog-filter';
 import { resolver, searchCards, batchResolver, printingDetails, localizer, catalogSearch, collectionPrintings, type Card, type Resolution } from './scryfall';
 import { exportDeck, type DeckLine } from './parser';
 import {matchesPriceFilters,comparePrices} from '../shared/filters';
@@ -15,9 +17,14 @@ import {normalizeName} from '../shared/card-name';
 import {inventoryValuer,lineKey,type InventoryLine} from './valuation';
 import {parseImport,exportManaBox,type ImportedLine} from './manabox';
 import {MAX_IMPORT_BYTES} from '../shared/import-limit';
-import {marketPrices} from './prices';
+import {marketPrices,previewPrices} from './prices';
+import {ScryfallError} from './scryfall-client';
 import { getMatches } from './matches';
 
+function scryfallFailure(error:ScryfallError,res:express.Response){
+ if(error.retryAfter)res.set('Retry-After',String(error.retryAfter));
+ res.status(error.status).json({error:error.message,...(error.retryAfter?{retry_after:error.retryAfter}:{})});
+}
 const credentials=z.object({username:z.string().trim().regex(/^[a-zA-Z0-9_-]{3,30}$/),password:z.string().min(12).max(72).refine(value=>Buffer.byteLength(value,'utf8')<=72)});
 const sessionToken=(req:express.Request)=>req.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1]??'';
 const inviteToken=(req:express.Request)=>req.headers.cookie?.match(/(?:^|;\s*)invitation=([a-f0-9]{64})(?:;|$)/)?.[1]??'';
@@ -25,7 +32,8 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  const config=configuration();
  const suppliedResolver=resolveCard;resolveCard??=resolver(db);
  const resolveMany=suppliedResolver?async(names:string[],progress:(done:number,total:number)=>void)=>{const results=new Map<string,Resolution>();for(const name of names){const key=name.toLowerCase();try{results.set(key,{card:await suppliedResolver(name)});}catch(e){results.set(key,{error:(e as Error).message});}progress(results.size,names.length);}return results;}:batchResolver(db);
- const details=printingDetails(),prices=marketPrices(),catalog=catalogSearch(db);
+ const details=printingDetails(db),prices=marketPrices(),catalog=catalogSearch(db);
+ const matchCatalog=catalogMatcher(catalog);
  const valueInventory=inventoryValuer(db,prices);
  const generation=(id:string)=>Number(db.prepare('SELECT reset_version FROM user_settings WHERE user_id=?').get(id)?.reset_version??0);
  const translate=suppliedResolver?async<T extends Card>(cards:T[],_wait=true)=>cards:localizer(db);
@@ -79,10 +87,10 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   res.locals.user=session;next();
  });
  const search=searchCards(db);
- app.get('/api/cards/search',async(req,res)=>{const q=z.string().trim().max(200).parse(req.query.q??'');try{res.json(await search(q));}catch{res.status(503).json({error:'Recherche indisponible. Réessayez.'});}});
+ app.get('/api/cards/search',async(req,res)=>{const q=z.string().trim().max(200).parse(req.query.q??'');try{res.json(await search(q));}catch(error){if(error instanceof ScryfallError){scryfallFailure(error,res);return;}res.status(503).json({error:'Recherche indisponible. Réessayez.'});}});
  app.get('/api/cards/:id/details',async(req,res)=>{
   const id=z.string().uuid().parse(req.params.id);const foil=req.query.foil==='1';
-  try{const card=await details(id);const pricing=await prices(card.versions,foil);const stored=db.prepare('SELECT * FROM cards WHERE oracle_id=?').get(id) as Card|undefined;const localized=stored?(await translate([stored]))[0]:undefined;res.json({...card,...pricing,fr_name:localized?.fr_name??null});}catch{res.status(503).json({error:'Les versions ne sont pas disponibles pour le moment. Réessaie.'});}
+  try{const card=await details(id);const pricing=await previewPrices(()=>prices(card.versions,foil),card.versions,foil);const stored=db.prepare('SELECT * FROM cards WHERE oracle_id=?').get(id) as Card|undefined;const localized=stored?(await translate([stored]))[0]:undefined;res.json({...card,...pricing,warning:[card.warning,pricing.warning].filter(Boolean).join(' ')||null,fr_name:localized?.fr_name??null});}catch(error){if(error instanceof ScryfallError){scryfallFailure(error,res);return;}res.status(503).json({error:'Le chargement des versions a échoué. Réessaie.'});}
  });
  app.post('/api/cards/localize',async(req,res)=>{
   const {ids}=z.object({ids:z.array(z.string().uuid()).max(100)}).parse(req.body);
@@ -99,7 +107,11 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  });
  app.get('/api/cards/filter',async(req,res)=>{
   const q=z.string().trim().min(1).max(4000).parse(req.query.q);const page=z.coerce.number().int().min(1).max(1000).parse(req.query.page??1);
-  try{res.json(await catalog(q,page));}catch{res.status(503).json({error:'Recherche avancée indisponible ou expression invalide. Vérifie les filtres.'});}
+  try{res.json(await catalog(q,page));}catch(error){if(error instanceof ScryfallError){scryfallFailure(error,res);return;}res.status(503).json({error:'Recherche avancée indisponible. Réessaie.'});}
+ });
+ app.post('/api/cards/filter-list',async(req,res)=>{
+  const {query,ids}=z.object({query:z.string().trim().max(4000),ids:z.array(z.string().uuid()).max(30000)}).parse(req.body);
+  try{res.json({ids:[...await matchCatalog(query,ids)]});}catch(error){if(error instanceof ScryfallError){scryfallFailure(error,res);return;}res.status(503).json({error:'Recherche avancée indisponible. Réessaie.'});}
  });
  app.get('/api/settings',(_req,res)=>res.json(db.prepare('SELECT collection_target FROM user_settings WHERE user_id=?').get(res.locals.user.id)??{collection_target:null}));
  app.patch('/api/settings',(req,res)=>{
@@ -176,9 +188,16 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   if(!result.changes){res.status(404).json({error:'Demande introuvable.'});return;}res.json({ok:true});
  });
  app.delete('/api/friends/:id',(req,res)=>{const result=db.prepare('DELETE FROM friendships WHERE id=? AND (requester=? OR recipient=?)').run(req.params.id,res.locals.user.id,res.locals.user.id);if(!result.changes){res.status(404).json({error:'Relation introuvable.'});return;}res.json({ok:true});});
+ friendLibrary(app,db,translate,matchCatalog);
  app.get('/api/matches',async(_req,res)=>{const matches=getMatches(db,res.locals.user.id);await translate([...matches.receive,...matches.give] as unknown as Card[]);res.json(matches);});
  app.get('/api/decks',async(req,res)=>{
-  const decks=db.prepare('SELECT d.*,s.target_size,(SELECT count(*) FROM deck_cards WHERE deck_id=d.id) AS line_count,(SELECT count(DISTINCT oracle_id) FROM deck_cards WHERE deck_id=d.id) AS distinct_count FROM decks d LEFT JOIN deck_settings s ON s.deck_id=d.id WHERE d.user_id=? ORDER BY d.created_at DESC').all(res.locals.user.id);
+  let decks=db.prepare('SELECT d.*,s.target_size,(SELECT count(*) FROM deck_cards WHERE deck_id=d.id) AS line_count,(SELECT count(DISTINCT oracle_id) FROM deck_cards WHERE deck_id=d.id) AS distinct_count FROM decks d LEFT JOIN deck_settings s ON s.deck_id=d.id WHERE d.user_id=? ORDER BY d.created_at DESC').all(res.locals.user.id);
+  const advanced=z.string().max(4000).parse(req.query.advanced??'');
+  if(advanced){
+   const lines=db.prepare('SELECT dc.deck_id,dc.oracle_id FROM deck_cards dc JOIN decks d ON d.id=dc.deck_id WHERE d.user_id=?').all(res.locals.user.id);
+   const ids=await matchCatalog(advanced,lines.map(line=>String(line.oracle_id)));
+   const deckIds=new Set(lines.filter(line=>ids.has(String(line.oracle_id))).map(line=>line.deck_id));decks=decks.filter(deck=>deckIds.has(deck.id));
+  }
   if(req.query.summary==='1'){
    res.json(decks.map(d=>({...d,card_count:db.prepare('SELECT coalesce(sum(quantity),0) AS n FROM deck_cards WHERE deck_id=?').get(d.id)?.n,
     missing_count:db.prepare(`SELECT coalesce(sum(max(0,needed-coalesce(o.quantity,0))),0) AS n FROM (SELECT oracle_id,sum(quantity) AS needed FROM deck_cards WHERE deck_id=? AND section<>'maybeboard' GROUP BY oracle_id) dc LEFT JOIN collection o ON o.oracle_id=dc.oracle_id AND o.user_id=?`).get(d.id,res.locals.user.id)?.n})));return;
@@ -203,8 +222,14 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   for(const bound of [priceFilters.priceMin,priceFilters.priceMax])if(bound)z.coerce.number().finite().min(0).parse(bound);
   z.enum(['','priced','unpriced']).parse(priceFilters.priceStatus);z.enum(['','name','price-asc','price-desc']).parse(sort);
   const select='SELECT c.*,dc.id,dc.section,dc.quantity,dc.set_code,dc.collector_number,dc.foil,dc.finish,dc.language,dc.condition '+from+' ORDER BY dc.id';
-  if(sort.startsWith('price-')||Object.values(priceFilters).some(Boolean)){
-   const all=db.prepare(select).all(...args) as unknown as (Card & InventoryLine)[];
+  const advanced=z.string().max(4000).parse(req.query.advanced??'');
+  if(advanced||sort.startsWith('price-')||Object.values(priceFilters).some(Boolean)){
+   let all=db.prepare(select).all(...args) as unknown as (Card & InventoryLine)[];
+   if(advanced){const ids=await matchCatalog(advanced,all.map(card=>card.oracle_id));all=all.filter(card=>ids.has(card.oracle_id));}
+   if(advanced&&!sort.startsWith('price-')&&!Object.values(priceFilters).some(Boolean)){
+    if(!db.prepare('SELECT id FROM decks WHERE id=? AND user_id=?').get(req.params.id,res.locals.user.id)){res.status(404).json({error:'Deck introuvable.'});return;}
+    res.json({cards:await translate(all.slice(offset,offset+100)),total:all.length,quantity:all.reduce((sum,card)=>sum+card.quantity,0)});return;
+   }
    const unique=[...new Map(all.map(card=>[lineKey(card),{...card,quantity:1}])).values()];const value=await valueInventory(unique),quotes=new Map(value.rows.map(row=>[lineKey(row),row]));
    if(!db.prepare('SELECT id FROM decks WHERE id=? AND user_id=?').get(req.params.id,res.locals.user.id)){res.status(404).json({error:'Deck introuvable.'});return;}
    const priced=all.map(card=>({...card,unit_price:quotes.get(lineKey(card))?.unit_price??null,estimated:quotes.get(lineKey(card))?.estimated,source:quotes.get(lineKey(card))?.source??undefined})).filter(card=>matchesPriceFilters(card,priceFilters));
@@ -306,6 +331,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  app.use((error:any,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{
   if(res.destroyed)return;
   if(res.headersSent){res.write(JSON.stringify({type:'error',error:'Import interrompu. Vérifie les decks enregistrés avant de réessayer.'})+'\n');res.end();return;}
+  if(error instanceof ScryfallError){scryfallFailure(error,res);return;}
   if(error instanceof z.ZodError){res.status(400).json({error:'Données invalides.',details:error.issues});return;}
   if(error?.type==='entity.too.large'){res.status(413).json({error:'Oups, ce fichier est trop gros : maximum 10 Mo pour la decklist.'});return;}
   if(error?.type==='entity.parse.failed'){res.status(400).json({error:'Le texte envoyé est illisible. Réessaie.'});return;}

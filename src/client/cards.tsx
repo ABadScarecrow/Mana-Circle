@@ -8,6 +8,9 @@ import {displayName} from '../shared/card-name';
 import {useCardInfo} from './card-info';
 type Candidate={oracle_id:string;name:string;image:string|null;type_line:string;fr_name?:string|null};
 type Request=(path:string,method?:string,body?:unknown,signal?:AbortSignal)=>Promise<any>;
+export function InventoryCards<T extends Candidate & {quantity:number}>({cards,view,cardKey,actions,details,quantityText}:{cards:T[];view:'list'|'cards';cardKey?:(card:T)=>React.Key;actions?:(card:T)=>React.ReactNode;details?:(card:T)=>React.ReactNode;quantityText?:(card:T)=>string}){
+ return <div className={view==='cards'?'card-grid':'compact-list'}>{cards.map(card=><article className="card" key={cardKey?.(card)??card.oracle_id}><CardPreview card={card}><CardImage card={card}/></CardPreview><div><h3><CardPreview card={card}><CardName card={card}/></CardPreview></h3><CardPrice card={card}/><p>{card.type_line}</p>{details?.(card)}<div className="card-actions"><span>{quantityText?.(card)??`${card.quantity} exemplaire${card.quantity>1?'s':''}`}</span>{actions?.(card)}</div></div></article>)}</div>;
+}
 export function CardImage({card,className=''}:{card:Pick<Candidate,'oracle_id'|'name'|'image'|'fr_name'>;className?:string}){
  card=useFrenchCard(card);
  const [failed,setFailed]=useState(false);useEffect(()=>setFailed(false),[card.image]);
