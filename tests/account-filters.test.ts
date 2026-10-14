@@ -12,7 +12,7 @@ test('filters combine identity criteria, accents, quantities and full query synt
  assert.ok(!matchesFilters({...card,foil:undefined},{...emptyFilters,foil:'0'}));
  const query=buildCatalogQuery({type:'Dragon',mv:'<=5',rarity:'rare',priceMin:'2',dateMin:'2020-01-01',finish:'foil',advanced:'is:legendary or keyword:flying'});
  assert.match(query,/type:"Dragon"/);assert.match(query,/mv<=5/);assert.match(query,/eur>=2/);assert.match(query,/date>=2020-01-01/);assert.match(query,/is:foil/);assert.match(query,/\(is:legendary or keyword:flying\)/);
- assert.equal(buildCatalogQuery({}), '');assert.equal(buildCatalogQuery({name:'A "Quoted" Name'}),'name:"A \\"Quoted\\" Name"');
+ assert.equal(buildCatalogQuery({}), '');assert.equal(buildCatalogQuery({language:'preferred'}),'');assert.equal(buildCatalogQuery({name:'A "Quoted" Name'}),'name:"A \\"Quoted\\" Name"');
 });
 test('parenthesis validation accepts nesting and ignores quoted parentheses',()=>{
  assert.equal(validateScryfallParentheses('(type:creature (color:white or color:blue)) name:"Card (test)"'),null);
@@ -29,6 +29,26 @@ test('local filters combine colors, mana cost, and colored mana requirements',()
  assert.equal(matchesFilters(card,{...emptyFilters,colors:'UW',mana:'{W}',white:'1',blue:'1'}),true);
  assert.equal(matchesFilters(card,{...emptyFilters,colors:'B'}),false);
  assert.equal(matchesFilters(card,{...emptyFilters,red:'1'}),false);
+});
+test('every list filter field matches its corresponding card data',()=>{
+ const card={name:'Lightning Bolt',fr_name:'Foudre',oracle_id:'bolt-id',type_line:'Instant — Arcane',quantity:3,colors:'["W","U"]',mana_cost:'{2}{W}{U}',set_code:'m10',section:'sideboard',foil:1,unit_price:1.5};
+ const cases:Partial<Record<keyof typeof emptyFilters,string>>={name:'FOUDRE',type:'arcane',colors:'WU',mana:'{W}',white:'1',blue:'1',black:'0',red:'0',green:'0',set:'M10',section:'sideboard',foil:'1',min:'2',max:'3',oracle:'bolt-id',priceMin:'1.5',priceMax:'1.5',priceStatus:'priced'};
+ for(const [field,value] of Object.entries(cases))assert.equal(matchesFilters(card,{...emptyFilters,[field]:value}),true,`field ${field} should match`);
+ assert.equal(matchesFilters({...card,colors:'["B"]'},{...emptyFilters,colors:'WU'}),false);
+ assert.equal(matchesFilters({...card,unit_price:null},{...emptyFilters,priceStatus:'priced'}),false);
+ assert.equal(matchesFilters({...card,unit_price:null},{...emptyFilters,priceStatus:'unpriced'}),true);
+ assert.equal(matchesFilters(card,{...emptyFilters,name:'lightning bolt'}),true);
+});
+test('card type filters accept French and English names with accents, plural forms and mixed-language queries',()=>{
+ const creature={name:'Dragon',type_line:'Legendary Creature — Dragon',quantity:1};
+ const instant={name:'Bolt',type_line:'Instant',quantity:1};
+ assert.equal(matchesFilters(creature,{...emptyFilters,type:'créature'}),true);
+ assert.equal(matchesFilters(creature,{...emptyFilters,type:'CREATURE'}),true);
+ assert.equal(matchesFilters(creature,{...emptyFilters,type:'créatures légendaires'}),true);
+ assert.equal(matchesFilters(creature,{...emptyFilters,type:'légendaire dragon'}),true);
+ assert.equal(matchesFilters(instant,{...emptyFilters,type:'éphémère'}),true);
+ assert.equal(matchesFilters(instant,{...emptyFilters,type:'ephemere'}),true);
+ assert.equal(matchesFilters(instant,{...emptyFilters,type:'créature'}),false);
 });
 test('reset wipes only the current user, retains identity, revokes other sessions and clears objectives',async()=>{
  const db=openDatabase(':memory:');const resolve=async(name:string)=>{const card={oracle_id:name,name,image:null,type_line:'Instant'};db.prepare('INSERT OR IGNORE INTO cards VALUES (?,?,?,?)').run(name,name,null,'Instant');db.prepare('INSERT OR IGNORE INTO card_names VALUES (?,?)').run(name,name);return card;};
@@ -68,14 +88,16 @@ test('an import in flight is cancelled by a reset instead of restoring deleted d
  }finally{release();db.close();}
 });
 test('deck filters apply before pagination and counts reflect matching rows',async()=>{
- const db=openDatabase(':memory:');const resolve=async(name:string)=>{const card={oracle_id:name,name,image:null,type_line:'Instant'};db.prepare('INSERT OR IGNORE INTO cards VALUES (?,?,?,?)').run(name,name,null,'Instant');db.prepare('INSERT OR IGNORE INTO card_names VALUES (?,?)').run(name,name);return card;};
+ const db=openDatabase(':memory:');const resolve=async(name:string)=>{const type_line=name==='Dragon'?'Legendary Creature — Dragon':'Instant';const card={oracle_id:name,name,image:null,type_line};db.prepare('INSERT OR IGNORE INTO cards VALUES (?,?,?,?)').run(name,name,null,type_line);db.prepare('INSERT OR IGNORE INTO card_names VALUES (?,?)').run(name,name);return card;};
  const agent=request.agent(createApp(db,resolve));
  try{
   await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'filteruser',password:'correct horse battery'}).expect(200);
-  const imported=await agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Deck',text:'Deck\n'+ '1 Bolt (M10) 146\n'.repeat(120)+'Sideboard\n2 Counterspell (DMR) 49 *F'}).expect(201);
+  const imported=await agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Deck',text:'Deck\n'+ '1 Bolt (M10) 146\n'.repeat(120)+'Sideboard\n2 Counterspell (DMR) 49 *F\n1 Dragon'}).expect(201);
   db.prepare('INSERT INTO card_localizations VALUES (?,?,?)').run('Counterspell','Contresort',Date.now());
   const result=await agent.get(`/api/decks/${imported.body.id}/cards?section=sideboard&foil=1&name=CONTRESORT&set=dmr&min=2`).expect(200);
   assert.equal(result.body.total,1);assert.equal(result.body.quantity,2);assert.equal(result.body.cards[0].name,'Counterspell');
+  const frenchType=await agent.get(`/api/decks/${imported.body.id}/cards?type=${encodeURIComponent('créature')}`).expect(200);
+  assert.equal(frenchType.body.total,1);assert.equal(frenchType.body.cards[0].type_line,'Legendary Creature — Dragon');
   await agent.get(`/api/decks/${imported.body.id}/cards?min=-1`).expect(400);
  }finally{db.close();}
 });

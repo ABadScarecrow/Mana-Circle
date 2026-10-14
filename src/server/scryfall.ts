@@ -3,16 +3,31 @@ import {transaction} from './db';
 import {normalizeName} from '../shared/card-name';
 import {nameDistance,rankCandidates} from '../shared/levenshtein';
 import {scryfallClient,ScryfallError} from './scryfall-client';
-export type Card={oracle_id:string;name:string;image:string|null;type_line:string;fr_name?:string|null};
+export type Card={oracle_id:string;name:string;image:string|null;type_line:string;fr_type_line?:string|null;fr_name?:string|null;mana_cost?:string;colors?:string[]};
 const request=scryfallClient();
+const displayLanguageRanks=new WeakMap<DatabaseSync,Map<string,{lang:string;rank:number}>>();
 function printedFrenchName(data:any):string|null {return data.printed_name??(data.card_faces?.every((f:any)=>f.printed_name)?data.card_faces.map((f:any)=>f.printed_name).join(' // '):null);}
 export function save(db:DatabaseSync,data:any):Card{
  if(!data.oracle_id)throw new Error('Cette entrée ne possède pas d’identifiant Oracle.');
- const card:Card={oracle_id:data.oracle_id,name:data.name,image:data.image_uris?.normal??data.card_faces?.[0]?.image_uris?.normal??null,type_line:data.type_line??''};
- db.prepare('INSERT INTO cards VALUES (?,?,?,?) ON CONFLICT(oracle_id) DO UPDATE SET name=excluded.name,image=excluded.image,type_line=excluded.type_line').run(card.oracle_id,card.name,card.image,card.type_line);
+ const language=typeof data.lang==='string'?data.lang.toLowerCase():'';
+ const priority=(lang:string)=>lang==='fr'?2:lang==='en'?1:0;
+ let ranks=displayLanguageRanks.get(db);if(!ranks)displayLanguageRanks.set(db,ranks=new Map());
+ let currentPreference=ranks.get(data.oracle_id);
+ if(!currentPreference){const stored=db.prepare('SELECT lang FROM card_display_preferences WHERE oracle_id=?').get(data.oracle_id) as {lang:string}|undefined;if(stored)currentPreference={lang:stored.lang,rank:priority(stored.lang)};if(currentPreference)ranks.set(data.oracle_id,currentPreference);}
+ const shouldPrefer=!currentPreference||priority(language)>currentPreference.rank;
+ const incomingName=typeof data.name==='string'?data.name:'';
+ const incomingImage=data.image_uris?.normal??data.card_faces?.[0]?.image_uris?.normal??null;
+ const incomingType=data.type_line??'';
+ db.prepare('INSERT OR IGNORE INTO cards VALUES (?,?,?,?)').run(data.oracle_id,incomingName,incomingImage,incomingType);
+ if(shouldPrefer){
+  db.prepare('UPDATE cards SET name=?,image=COALESCE(?,image),type_line=? WHERE oracle_id=?').run(incomingName||data.oracle_id,incomingImage,incomingType,data.oracle_id);
+  db.prepare('INSERT INTO card_display_preferences VALUES (?,?) ON CONFLICT(oracle_id) DO UPDATE SET lang=excluded.lang').run(data.oracle_id,language);
+  ranks.set(data.oracle_id,{lang:language,rank:priority(language)});
+ }
+ const card:Card={oracle_id:data.oracle_id,name:incomingName||data.oracle_id,image:incomingImage,type_line:incomingType,mana_cost:data.mana_cost??data.card_faces?.map((face:any)=>face.mana_cost??'').filter(Boolean).join(' // '),colors:data.colors??data.card_faces?.flatMap((face:any)=>face.colors??[])};
  if(data.id)db.prepare('INSERT OR REPLACE INTO card_printings VALUES (?,?,?,?,?,?)').run(data.id,card.oracle_id,data.set??null,data.collector_number??null,data.released_at??null,JSON.stringify({...data,prices_checked_at:Date.now()}));
  db.prepare('INSERT OR REPLACE INTO card_names VALUES (?,?)').run(card.name,card.oracle_id);
- if(data.lang==='fr'){const fr=printedFrenchName(data);if(fr){db.prepare('INSERT OR REPLACE INTO card_localizations VALUES (?,?,?)').run(card.oracle_id,fr,Date.now());db.prepare('INSERT OR REPLACE INTO card_names VALUES (?,?)').run(fr.toLowerCase(),card.oracle_id);card.fr_name=fr;}}
+ if(data.lang==='fr'){const fr=printedFrenchName(data);if(fr){db.prepare('INSERT OR REPLACE INTO card_localizations VALUES (?,?,?)').run(card.oracle_id,fr,Date.now());db.prepare('INSERT OR REPLACE INTO card_names VALUES (?,?)').run(fr.toLowerCase(),card.oracle_id);card.fr_name=fr;}if(typeof data.type_line==='string'&&data.type_line.trim()){db.prepare('INSERT OR REPLACE INTO card_type_localizations VALUES (?,?)').run(card.oracle_id,data.type_line);card.fr_type_line=data.type_line;}}
  return card;
 }
 export function resolver(db:DatabaseSync){return async(name:string):Promise<Card>=>{
@@ -31,15 +46,41 @@ export function resolver(db:DatabaseSync){return async(name:string):Promise<Card
 };}
 export function searchCards(db:DatabaseSync){
  const cache=new Map<string,{expires:number;cards:Card[]}>(),pending=new Map<string,Promise<Card[]>>();const translate=localizer(db);
- const known=db.prepare('SELECT c.*,l.fr_name FROM cards c LEFT JOIN card_localizations l USING(oracle_id)');
+ const localCandidates=(query:string)=>{
+  // card_names has a NOCASE primary-key index. Prefix probes keep lookups
+  // bounded and fast without scanning or building an in-memory copy of the
+  // entire bulk catalog. Deleting one character from the first few positions
+  // also recovers common typing mistakes (for example, transposed letters).
+  const tokens=normalizeName(query).split(/[^\p{L}\p{N}]+/u).filter(token=>token.length>=3).sort((a,b)=>b.length-a.length);
+  const prefixes=new Set<string>();
+  const phrase=normalizeName(query).trim();if(phrase.includes(' '))prefixes.add(phrase);
+  for(const token of tokens.slice(0,2)){
+   prefixes.add(token.slice(0,Math.min(5,token.length)));
+   if(token.length>=5)for(let i=0;i<Math.min(5,token.length);i++)prefixes.add((token.slice(0,i)+token.slice(i+1)).slice(0,4));
+  }
+  const lookup=db.prepare("SELECT DISTINCT c.*,l.fr_name FROM card_names n JOIN cards c USING(oracle_id) LEFT JOIN card_localizations l USING(oracle_id) WHERE n.name LIKE ? ESCAPE '\\' LIMIT 250");
+  const found=new Map<string,Card>();
+  for(const prefix of prefixes){
+   const escaped=prefix.replace(/[\\%_]/g,'\\$&');
+   for(const card of lookup.all(escaped+'%') as unknown as Card[])found.set(card.oracle_id,card);
+   if(found.size>=1000)break;
+  }
+  return [...found.values()];
+ };
  const score=(query:string,card:Card)=>Math.min(nameDistance(query,card.name),card.fr_name?nameDistance(query,card.fr_name):Infinity);
+ const exactName=db.prepare('SELECT c.*,l.fr_name FROM card_names n JOIN cards c USING(oracle_id) LEFT JOIN card_localizations l USING(oracle_id) WHERE n.name=? COLLATE NOCASE LIMIT 8');
  return async(query:string):Promise<Card[]>=>{
   const key=normalizeName(query).replace(/\s+/g,' ');if(key.length<2)return [];
   const hit=cache.get(key);if(hit&&hit.expires>Date.now())return hit.cards;
   if(pending.has(key))return pending.get(key)!;
   const job=(async()=>{
-   const local=rankCandidates(query,known.all() as unknown as Card[]).filter(card=>score(query,card)<=0.5).slice(0,8);
+   // Exact canonical or localized names use the existing primary-key index and
+   // should not initialize or scan the fuzzy-search catalog at all.
+   const exact=exactName.all(query.trim().toLowerCase()) as unknown as Card[];
+   if(exact.length){cache.set(key,{expires:Date.now()+300000,cards:exact});return exact;}
+   const local=rankCandidates(query,localCandidates(query)).filter(card=>score(query,card)<=0.5).slice(0,8);
    if(local.some(card=>score(query,card)===0)){cache.set(key,{expires:Date.now()+300000,cards:local});return local;}
+   if(local.length&&score(query,local[0])<=0.3){const cards=await translate(local);cache.set(key,{expires:Date.now()+300000,cards});return cards;}
    let cards:Card[]=[],failure:unknown;
    try{
     const data=await request(`/cards/autocomplete?q=${encodeURIComponent(key)}`);
@@ -86,6 +127,17 @@ export function searchCards(db:DatabaseSync){
  };
 }
 
+export function preferCatalogLanguages<T extends {oracle_id:string;lang?:string}>(versions:T[],query:string,preferences:ReadonlyMap<string,string>=new Map(),allLanguages=false):T[]{
+ if(allLanguages||/\blang\s*:/i.test(query))return versions;
+ const groups=new Map<string,T[]>();
+ for(const version of versions){let group=groups.get(version.oracle_id);if(!group)groups.set(version.oracle_id,group=[]);group.push(version);}
+ return [...groups.entries()].flatMap(([oracleId,group])=>{
+  const preferred=group.filter(version=>version.lang==='fr'||version.lang==='en');
+  if(preferences.has(oracleId))return preferences.get(oracleId)==='fr'||preferences.get(oracleId)==='en'?preferred:group;
+  return preferred.length?preferred:group;
+ });
+}
+
 export type Resolution={card?:Card;error?:string};
 export function batchResolver(db:DatabaseSync){return async(names:string[],progress:(done:number,total:number)=>void=()=>{})=>{
  const unique=[...new Set(names.map(n=>n.trim().toLowerCase()))];
@@ -107,15 +159,20 @@ export function batchResolver(db:DatabaseSync){return async(names:string[],progr
 };}
 export function printingDetails(db?:DatabaseSync){
  const cache=new Map<string,{expires:number;value:any}>(),pending=new Map<string,Promise<any>>();
+ const hasBulk=!!db?.prepare('SELECT 1 FROM scryfall_bulk_import WHERE type=?').get('all_cards');
  const stored=(id:string)=>db?db.prepare('SELECT data FROM card_printings WHERE oracle_id=? ORDER BY released_at DESC').all(id).flatMap(row=>{try{const data=JSON.parse(String(row.data));return data.oracle_id===id&&typeof data.name==='string'?[data]:[];}catch{return [];}}):[];
  const format=(oracleId:string,versions:any[],warning:string|null=null,stale=false)=>{
-  const first=versions[0];if(!first)throw new ScryfallError('Aucune version disponible pour cette carte.',404);
-  return {oracle_id:oracleId,name:first.name,type_line:first.type_line??'',oracle_text:first.oracle_text??first.card_faces?.map((face:any)=>face.oracle_text??'').join('\n')??'',mana_cost:first.mana_cost??'',warning,stale,checked_at:Date.now(),versions:versions.map(v=>({id:v.id,oracle_id:v.oracle_id,name:v.name,image:v.image_uris?.normal??v.card_faces?.[0]?.image_uris?.normal??null,set_code:v.set??'',set_name:v.set_name??v.set??'',collector_number:v.collector_number??'',released_at:v.released_at??'',rarity:v.rarity,finishes:v.finishes??[],cardmarket_id:v.cardmarket_id??null,url:v.purchase_uris?.cardmarket??null,usd:v.prices?.usd??null,usd_foil:v.prices?.usd_foil??null,usd_etched:v.prices?.usd_etched??null,eur:v.prices?.eur??null,eur_foil:v.prices?.eur_foil??null,prices_checked_at:v.prices_checked_at??Date.now()}))};
+  if(!versions.length)throw new ScryfallError('Aucune version disponible pour cette carte.',404);
+  const preferred=versions.filter(v=>v.lang==='fr'||v.lang==='en');
+  const visible=preferred.length?preferred:versions;
+  const first=visible.find(v=>v.lang==='fr')??visible[0];
+  return {oracle_id:oracleId,name:first.name,type_line:first.type_line??'',oracle_text:first.oracle_text??first.card_faces?.map((face:any)=>face.oracle_text??'').join('\n')??'',mana_cost:first.mana_cost??'',warning,stale,checked_at:Date.now(),versions:visible.map(v=>({id:v.id,oracle_id:v.oracle_id,name:v.name,image:v.image_uris?.normal??v.card_faces?.[0]?.image_uris?.normal??null,set_code:v.set??'',set_name:v.set_name??v.set??'',collector_number:v.collector_number??'',released_at:v.released_at??'',language:v.lang??null,rarity:v.rarity,finishes:v.finishes??[],cardmarket_id:v.cardmarket_id??null,url:v.purchase_uris?.cardmarket??null,usd:v.prices?.usd??null,usd_foil:v.prices?.usd_foil??null,usd_etched:v.prices?.usd_etched??null,eur:v.prices?.eur??null,eur_foil:v.prices?.eur_foil??null,prices_checked_at:v.prices_checked_at??Date.now()}))};
  };
  return async(oracleId:string)=>{
   const hit=cache.get(oracleId);if(hit&&hit.expires>Date.now())return hit.value;
   if(pending.has(oracleId))return pending.get(oracleId)!;
   const job=(async()=>{
+   if(hasBulk){const versions=stored(oracleId);if(versions.length){const value=format(oracleId,versions);if(cache.size>=100)cache.delete(cache.keys().next().value!);cache.set(oracleId,{expires:Date.now()+3600000,value});return value;}}
    const versions:any[]=[],visited=new Set<string>();
    let path='/cards/search?q='+encodeURIComponent(`oracleid:${oracleId}`)+'&unique=prints&include_extras=true&order=released&dir=desc';
    try{
@@ -146,7 +203,8 @@ export function printingDetails(db?:DatabaseSync){
 export function localizer(db:DatabaseSync){
  const pending=new Map<string,Promise<void>>();const ttl=7*86400000;
  const lookup=db.prepare('SELECT fr_name,checked_at FROM card_localizations WHERE oracle_id=?');
- return async<T extends Card>(cards:T[],wait=true):Promise<(T & Pick<Card,'fr_name'>)[]>=>{
+ return async<T extends Card>(cards:T[],wait=true):Promise<(T & Pick<Card,'fr_name'|'fr_type_line'>)[]>=>{
+  const typeIds=[...new Set(cards.map(card=>card.oracle_id))],byId=new Map<string,string>();for(let offset=0;offset<typeIds.length;offset+=500){const batch=typeIds.slice(offset,offset+500);if(!batch.length)continue;const types=db.prepare(`SELECT oracle_id,fr_type_line FROM card_type_localizations WHERE oracle_id IN (${batch.map(()=>'?').join(',')})`).all(...batch) as {oracle_id:string;fr_type_line:string}[];for(const row of types)byId.set(row.oracle_id,row.fr_type_line);}for(const card of cards)card.fr_type_line=byId.get(card.oracle_id)??null;
   const eligible=new Map<string,T>();const inFlight:Promise<void>[]=[];
   for(const card of cards){if(wait&&pending.has(card.oracle_id))inFlight.push(pending.get(card.oracle_id)!);const cached=lookup.get(card.oracle_id);if(cached)card.fr_name=cached.fr_name as string|null;
    if(/^[0-9a-f-]{36}$/i.test(card.oracle_id)&&!pending.has(card.oracle_id)&&(!cached||Number(cached.checked_at)<Date.now()-ttl))eligible.set(card.oracle_id,card);
@@ -156,15 +214,15 @@ export function localizer(db:DatabaseSync){
    for(let offset=0;offset<ids.length;offset+=25){const batch=ids.slice(offset,offset+25);
     try{
      let data:any;try{data=await request('/cards/search?q='+encodeURIComponent(`lang:fr (${batch.map(id=>'oracleid:'+id).join(' or ')})`)+'&unique=cards');}catch(e){if(!(e as Error).message.startsWith('Carte inconnue'))throw e;data={data:[]};}
-     const found=new Map<string,string>();for(const item of data.data??[]){const fr=printedFrenchName(item);if(item.lang==='fr'&&fr)found.set(item.oracle_id,fr);}
-     transaction(db,()=>{for(const id of batch){const fr=found.get(id)??null;db.prepare('INSERT OR REPLACE INTO card_localizations VALUES (?,?,?)').run(id,fr,Date.now());if(fr)db.prepare('INSERT OR REPLACE INTO card_names VALUES (?,?)').run(fr.toLowerCase(),id);}});
+     const found=new Map<string,{name:string|null;type:string|null}>();for(const item of data.data??[]){const fr=printedFrenchName(item);if(item.lang==='fr')found.set(item.oracle_id,{name:fr,type:typeof item.type_line==='string'?item.type_line:null});}
+     transaction(db,()=>{for(const id of batch){const localized=found.get(id),fr=localized?.name??null;db.prepare('INSERT OR REPLACE INTO card_localizations VALUES (?,?,?)').run(id,fr,Date.now());if(fr)db.prepare('INSERT OR REPLACE INTO card_names VALUES (?,?)').run(fr.toLowerCase(),id);if(localized?.type)db.prepare('INSERT OR REPLACE INTO card_type_localizations VALUES (?,?)').run(id,localized.type);}});
     }catch{ // A temporary failure keeps existing names and retries after one minute.
      try{for(const id of batch)db.prepare('INSERT INTO card_localizations VALUES (?,NULL,?) ON CONFLICT(oracle_id) DO UPDATE SET checked_at=excluded.checked_at').run(id,Date.now()-ttl+60000);}catch{/* Database closed while a background refresh was in flight. */}
     }finally{batch.forEach(id=>pending.delete(id));}
    }
   })();
   ids.forEach(id=>pending.set(id,task));
-  if(wait){await Promise.all([task,...inFlight]);for(const card of cards){const cached=lookup.get(card.oracle_id);if(cached)card.fr_name=cached.fr_name as string|null;}}
+  if(wait){await Promise.all([task,...inFlight]);for(const card of cards){const cached=lookup.get(card.oracle_id);if(cached)card.fr_name=cached.fr_name as string|null;}for(let offset=0;offset<ids.length;offset+=500){const batch=ids.slice(offset,offset+500);if(!batch.length)continue;for(const row of db.prepare(`SELECT oracle_id,fr_type_line FROM card_type_localizations WHERE oracle_id IN (${batch.map(()=>'?').join(',')})`).all(...batch) as {oracle_id:string;fr_type_line:string}[])byId.set(row.oracle_id,row.fr_type_line);}for(const card of cards)card.fr_type_line=byId.get(card.oracle_id)??null;}
   else void task;
   return cards;
  };
@@ -172,13 +230,22 @@ export function localizer(db:DatabaseSync){
 
 export async function collectionPrintings(db:DatabaseSync,identifiers:any[]):Promise<any[]> {
  const records:any[]=[];
- for(let offset=0;offset<identifiers.length;offset+=75){const data=await request('/cards/collection',{identifiers:identifiers.slice(offset,offset+75)});transaction(db,()=>{for(const item of data.data??[]){if(item.oracle_id){save(db,item);records.push(item);}}});}
+ const missing:any[]=[];
+ for(const identifier of identifiers){const id=typeof identifier?.id==='string'?identifier.id:null;const row=id?db.prepare('SELECT data FROM card_printings WHERE id=?').get(id) as {data:string}|undefined:undefined;
+  if(row){try{records.push(JSON.parse(row.data));continue;}catch{/* Refetch a corrupt local record. */}}
+  missing.push(identifier);
+ }
+ for(let offset=0;offset<missing.length;offset+=75){const data=await request('/cards/collection',{identifiers:missing.slice(offset,offset+75)});transaction(db,()=>{for(const item of data.data??[]){if(item.oracle_id){save(db,item);records.push(item);}}});}
  return records;
 }
-export function catalogSearch(db:DatabaseSync){const translate=localizer(db);return async(query:string,page:number,unique:'prints'|'cards'='prints')=>{
+export function catalogSearch(db:DatabaseSync): (query:string,page:number,unique?:'prints'|'cards',allLanguages?:boolean)=>Promise<any>{const translate=localizer(db);return async(query:string,page:number,unique:'prints'|'cards'='prints',allLanguages=false)=>{
  try{
   const data=await request('/cards/search?q='+encodeURIComponent(query)+'&unique='+unique+'&include_multilingual=true&page='+page);
-  const rows=(data.data??[]).filter((c:any)=>c.oracle_id).map((c:any)=>({...save(db,c),printing_id:c.id,set_code:c.set,collector_number:c.collector_number,released_at:c.released_at,rarity:c.rarity,colors:c.colors??[],cmc:c.cmc,artist:c.artist,finishes:c.finishes,language:c.lang}));
+  const candidates=(data.data??[]).filter((c:any)=>c.oracle_id);
+  const ids=[...new Set<string>(candidates.map((card:any)=>String(card.oracle_id)))];
+  const preferences=new Map<string,string>();
+  if(ids.length){const stored=db.prepare(`SELECT oracle_id,lang FROM card_display_preferences WHERE oracle_id IN (${ids.map(()=>'?').join(',')})`).all(...ids) as {oracle_id:string;lang:string}[];for(const preference of stored)preferences.set(preference.oracle_id,preference.lang);}
+  const rows=preferCatalogLanguages(candidates,query,preferences,allLanguages).map((c:any)=>({...save(db,c),printing_id:c.id,set_code:c.set,collector_number:c.collector_number,released_at:c.released_at,rarity:c.rarity,colors:c.colors??[],cmc:c.cmc,artist:c.artist,finishes:c.finishes,language:c.lang}));
   return {cards:await translate(rows),total:data.total_cards??rows.length,has_more:!!data.has_more,page};
  }catch(e){if((e as Error).message.startsWith('Carte inconnue'))return {cards:[],total:0,has_more:false,page};throw e;}
 };}

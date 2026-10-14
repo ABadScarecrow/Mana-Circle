@@ -8,7 +8,7 @@ Audit du code local avant modification, le 13 octobre 2026. Le dépôt contenait
 - SQLite : `users.password` contient le hash ; `sessions.token` contient SHA-256 d’un token crypto aléatoire de 32 octets, expire après sept jours. Logout supprime le token ; reset supprime les autres sessions. Aucun renouvellement glissant.
 - Sécurité effective : helmet utilisé, rate-limit utilisé pour register/login, en-tête personnalisé exigé pour écritures API, Origin exact s’il est fourni. Pas de CORS permissif. Cookie HttpOnly/SameSite Strict/Secure en production. Pas de configuration proxy explicite ; origine localhost par défaut même en production.
 - Autorisations : middleware commun sur toutes les API métier ; listes personnelles filtrées par user_id ; accès decks vérifie le propriétaire ; amitiés acceptées nécessaires aux correspondances. Requêtes SQL paramétrées. Les données carte sont un catalogue commun. Pas de contrôle global d’admission distinct de l’authentification.
-- JSON : plafond de 64 Mo conservé pour imports ; plafond métier de 10 Mo après parsing. Risque de charge par requêtes volumineuses, et appels externes longs pour utilisateurs autorisés. Pas de quota métier global.
+- JSON : plafond de 64 Mo par requête, sans plafond métier de 10 Mo après parsing. Risque de charge par requêtes volumineuses et appels externes longs pour utilisateurs autorisés. Pas de quota métier global.
 - Erreurs : réponses internes génériques, détails de validation Zod ; suppression du logging de l’objet exception entier pour éviter d’exposer des données sensibles dans les logs.
 - Scripts : tsx watch en dev, TypeScript strict + Vite build, Express via tsx au start ; tests Node/SQLite mémoire et Playwright avec API simulées.
 

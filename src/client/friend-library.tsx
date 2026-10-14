@@ -3,7 +3,7 @@ import {InventoryCards} from './cards';
 import {ViewButtons} from './list-tools';
 import {DensitySlider} from './tool-button';
 
-type LibraryCard={oracle_id:string;name:string;fr_name?:string|null;image:string|null;type_line:string;quantity:number;id?:number;section?:string;set_code?:string|null;collector_number?:string|null;foil?:number;finish?:string};
+type LibraryCard={oracle_id:string;name:string;fr_name?:string|null;fr_type_line?:string|null;image:string|null;type_line:string;quantity:number;id?:number;section?:string;set_code?:string|null;collector_number?:string|null;foil?:number;finish?:string};
 type FriendDeck={id:string;name:string;card_count:number;distinct_count:number;line_count:number};
 type CardsPage={cards:LibraryCard[];total:number;quantity:number};
 type Request=(path:string,method?:string,body?:unknown,signal?:AbortSignal)=>Promise<any>;

@@ -1,6 +1,22 @@
 import {normalizeName,displayName} from './card-name';
 export type LocalFilters={name:string;type:string;colors:string;mana:string;white:string;blue:string;black:string;red:string;green:string;set:string;section:string;foil:string;min:string;max:string;oracle:string;priceMin:string;priceMax:string;priceStatus:string};
 export const emptyFilters:LocalFilters={name:'',type:'',colors:'',mana:'',white:'',blue:'',black:'',red:'',green:'',set:'',section:'',foil:'',min:'',max:'',oracle:'',priceMin:'',priceMax:'',priceStatus:''};
+const typeAliases:Record<string,string[]>={
+ artifact:['artifact','artifacts','artefact','artefacts'],creature:['creature','creatures','créature','créatures'],enchantment:['enchantment','enchantments','enchantement','enchantements'],instant:['instant','instants','éphémère','éphémères'],land:['land','lands','terrain','terrains'],planeswalker:['planeswalker','planeswalkers'],sorcery:['sorcery','sorceries','rituel','rituels'],tribal:['tribal'],battle:['battle','battles','bataille','batailles'],
+ basic:['basic','de base'],legendary:['legendary','légendaire','légendaires'],snow:['snow','neigeux','neigeuse'],world:['world','monde'],
+};
+const aliasToCanonical=new Map(Object.entries(typeAliases).flatMap(([canonical,aliases])=>aliases.flatMap(alias=>alias.split(' ').map(word=>[normalizeName(word),canonical] as const))));
+const ignoredTypeWords=new Set(['de','du','des','the','card','cards','type','types']);
+export function cardTypeFilterGroups(value:string):string[][] {
+ return normalizeName(value).split(/[^\p{L}\p{N}]+/u).filter(word=>word&&!ignoredTypeWords.has(word)).map(word=>{
+  const canonical=aliasToCanonical.get(word)??word;
+  return typeAliases[canonical]??[word];
+ });
+}
+export function matchesCardTypeFilter(typeLine:string,value:string):boolean {
+ const normalized=normalizeName(typeLine);
+ return cardTypeFilterGroups(value).every(group=>group.some(alias=>normalized.includes(normalizeName(alias))));
+}
 /** Validate Scryfall syntax delimiters without interpreting the query language. */
 export function validateScryfallParentheses(query:string):string|null {
  let depth=0,quoted=false,escaped=false,lastOpen=-1;
@@ -23,10 +39,12 @@ export function validateScryfallParentheses(query:string):string|null {
 }
 export function matchesFilters(card:any,filters:LocalFilters):boolean {
  const quantity=Number(card.quantity??card.exchange_quantity??0);
- const colors=Array.isArray(card.colors)?card.colors.join(''):String(card.colors??'');
+ let colors=card.colors;
+ if(typeof colors==='string'&&colors.startsWith('[')){try{colors=JSON.parse(colors);}catch{}}
+ colors=Array.isArray(colors)?colors.join(''):String(colors??'');
  const required=card.color_mana??manaRequirements(String(card.mana_cost??''));
  return normalizeName(displayName(card)+' '+card.name).includes(normalizeName(filters.name))
-  && normalizeName(card.type_line??'').includes(normalizeName(filters.type))
+  && matchesCardTypeFilter(card.type_line??'',filters.type)
   && (!filters.colors||colors.toUpperCase().split('').sort().join('')===filters.colors.toUpperCase().replace(/[^WUBRG]/g,'').split('').sort().join(''))
   && (!filters.mana||normalizeName(card.mana_cost??'').includes(normalizeName(filters.mana)))
   && (['white','blue','black','red','green'] as const).every((key,index)=>!filters[key]||Number(required[index]??0)>=Number(filters[key]))
@@ -45,7 +63,7 @@ export function buildCatalogQuery(values:Record<string,string>):string {
  const quote=(value:string)=>'"'+value.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"';
  const clauses:string[]=[];
  const textFields:Record<string,string>={name:'name',type:'type',text:'oracle',artist:'artist',set:'set',number:'cn',oracleId:'oracleid',keyword:'keyword',rarity:'rarity',language:'lang',format:'legal',layout:'layout',game:'game',frame:'frame',border:'border'};
- for(const [key,operator] of Object.entries(textFields))if(values[key]?.trim())clauses.push(`${operator}:${quote(values[key].trim())}`);
+ for(const [key,operator] of Object.entries(textFields))if(values[key]?.trim()&&!(key==='language'&&values[key]==='preferred'))clauses.push(`${operator}:${quote(values[key].trim())}`);
  for(const [key,operator] of Object.entries({colors:'c',identity:'id',mana:'mana'}))if(values[key]?.trim())clauses.push(`${operator}:${quote(values[key].trim())}`);
  for(const [key,operator] of Object.entries({mv:'mv',power:'pow',toughness:'tou',loyalty:'loy',defense:'def',priceMin:'eur>=',priceMax:'eur<=',dateMin:'date>=',dateMax:'date<='}))if(values[key]?.trim())clauses.push(`${operator}${operator.endsWith('=')?'': /^[<>=]/.test(values[key].trim())?'':':'}${values[key].trim()}`);
  if(values.finish==='foil')clauses.push('is:foil');if(values.finish==='nonfoil')clauses.push('is:nonfoil');if(values.finish==='etched')clauses.push('is:etched');

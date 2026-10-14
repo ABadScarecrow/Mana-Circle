@@ -53,17 +53,15 @@ test('real production entry and admin share DB_PATH, preserve legacy data and en
   });
   const post=(route:string,body:object,cookie='')=>fetch(base+route,{method:'POST',headers:{'Content-Type':'application/json','X-Mana-Request':'1',Origin:env.APP_ORIGIN,Cookie:cookie},body:JSON.stringify(body)});
   const credentials={username:'newfriend',password:'correct horse battery'};
-  assert.equal((await post('/api/auth/register',credentials)).status,403);
-  assert.equal((await fetch(base+'/register')).status,403);
+  const registered=await post('/api/auth/register',credentials);assert.equal(registered.status,200);
+  assert.equal((await fetch(base+'/register')).status,200);
   assert.equal((await fetch(base+'/collection')).status,403);
   assert.equal((await fetch(base+'/api/collection')).status,401);
   assert.equal((await fetch(base+'/src/server/schema.sql')).status,403);
-  const grant=await post('/api/auth/invitation',{token:invitation});assert.equal(grant.status,200);
-  const inviteCookie=grant.headers.getSetCookie()[0].split(';')[0];
-  const registered=await post('/api/auth/register',credentials,inviteCookie);assert.equal(registered.status,200);
+  assert.equal((await post('/api/auth/register',credentials)).status,409);
   const cookie=registered.headers.getSetCookie().find(value=>value.startsWith('session='))!.split(';')[0];
   assert.match(registered.headers.getSetCookie().join(';'),/Secure/);
-  assert.equal((await post('/api/auth/register',{...credentials,username:'second',invitation})).status,403);
+  assert.equal((await post('/api/auth/register',{...credentials,username:'second'})).status,200);
   assert.equal((await fetch(base+'/api/me',{headers:{Cookie:cookie}})).status,200);
   await cli(['revoke-user','newfriend'],directory,env);
   assert.equal((await fetch(base+'/api/me',{headers:{Cookie:cookie}})).status,401);
@@ -76,14 +74,15 @@ test('real production entry and admin share DB_PATH, preserve legacy data and en
   const oldCookie=login.headers.getSetCookie()[0].split(';')[0];
   const collection=await fetch(base+'/api/collection',{headers:{Cookie:oldCookie}});
   assert.equal(collection.status,200);assert.equal((await collection.json())[0].quantity,3);
-  // Revoking a consumed invitation also revokes its associated account.
+  // Invitation revocation remains an admin function, but does not affect accounts
+  // created through the classic registration flow.
   await cli(['allow-user','newfriend'],directory,env);
   assert.equal((await post('/api/auth/login',credentials)).status,200);
   const invitationId=invitationOutput.match(/id: '([^']+)'/)?.[1];assert.ok(invitationId);
   await cli(['revoke-invite',invitationId],directory,env);
-  assert.equal((await post('/api/auth/login',credentials)).status,403);
+  assert.equal((await post('/api/auth/login',credentials)).status,200);
   const stored=openDatabase(path);
-  assert.equal(stored.prepare("SELECT count(*) AS n FROM sessions WHERE user_id=(SELECT id FROM users WHERE username='newfriend')").get()?.n,0);
+  assert.equal(stored.prepare("SELECT count(*) AS n FROM sessions WHERE user_id=(SELECT id FROM users WHERE username='newfriend')").get()?.n,2);
   assert.equal(stored.prepare("SELECT quantity FROM collection WHERE user_id='legacy'").get()?.quantity,3);
   stored.close();
  }finally{

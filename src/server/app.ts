@@ -6,20 +6,24 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { DatabaseSync } from 'node:sqlite';
 import { transaction } from './db';
-import {digest,validInvitation} from './access';
+import {digest} from './access';
 import {configuration} from './config';
 import {friendLibrary} from './friend-library';
 import {catalogMatcher} from './catalog-filter';
 import { resolver, searchCards, batchResolver, printingDetails, localizer, catalogSearch, collectionPrintings, type Card, type Resolution } from './scryfall';
 import { exportDeck, type DeckLine } from './parser';
-import {matchesPriceFilters,comparePrices} from '../shared/filters';
+import {matchesPriceFilters,comparePrices,cardTypeFilterGroups} from '../shared/filters';
 import {normalizeName} from '../shared/card-name';
-import {inventoryValuer,lineKey,type InventoryLine} from './valuation';
+import {allEditionLowAverages,inventoryValuer,lineKey,type InventoryLine} from './valuation';
+import {averageLowPriceKey} from '../shared/price-key';
 import {parseImport,exportManaBox,type ImportedLine} from './manabox';
-import {MAX_IMPORT_BYTES} from '../shared/import-limit';
 import {marketPrices,previewPrices} from './prices';
 import {ScryfallError} from './scryfall-client';
 import { getMatches } from './matches';
+import {commanderSpellbookClient} from './commander-suggestions';
+import {rankSynergyCandidates,type SynergyCardData} from './deckbuilder-synergy';
+
+const commanderSuggestions=commanderSpellbookClient();
 
 function scryfallFailure(error:ScryfallError,res:express.Response){
  if(error.retryAfter)res.set('Retry-After',String(error.retryAfter));
@@ -27,7 +31,6 @@ function scryfallFailure(error:ScryfallError,res:express.Response){
 }
 const credentials=z.object({username:z.string().trim().regex(/^[a-zA-Z0-9_-]{3,30}$/),password:z.string().min(12).max(72).refine(value=>Buffer.byteLength(value,'utf8')<=72)});
 const sessionToken=(req:express.Request)=>req.headers.cookie?.match(/(?:^|;\s*)session=([a-f0-9]{64})(?:;|$)/)?.[1]??'';
-const inviteToken=(req:express.Request)=>req.headers.cookie?.match(/(?:^|;\s*)invitation=([a-f0-9]{64})(?:;|$)/)?.[1]??'';
 export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolver>){
  const config=configuration();
  const suppliedResolver=resolveCard;resolveCard??=resolver(db);
@@ -38,28 +41,31 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  const generation=(id:string)=>Number(db.prepare('SELECT reset_version FROM user_settings WHERE user_id=?').get(id)?.reset_version??0);
  const translate=suppliedResolver?async<T extends Card>(cards:T[],_wait=true)=>cards:localizer(db);
  db.function('normalized_name',(value)=>normalizeName(String(value??'')));
+ const currentUser=(req:express.Request)=>db.prepare('SELECT u.id,u.username FROM sessions s JOIN users u ON u.id=s.user_id JOIN site_access a ON a.user_id=u.id AND a.allowed=1 WHERE s.token=? AND s.expires>?').get(digest(sessionToken(req)),Date.now());
  const app=express();app.disable('x-powered-by');
  app.set('trust proxy',config.trustProxy?'loopback':false);
  app.use((_req,res,next)=>{res.set('Referrer-Policy','no-referrer');next();});
  app.use(helmet({contentSecurityPolicy:config.production?{directives:{'img-src':["'self'",'https://cards.scryfall.io','data:'],'script-src':["'self'"], 'connect-src':["'self'",'ws:','wss:']}}:false}));
- app.use(express.json({limit:'64mb'}));
  app.use('/api',(req,res,next)=>{
   if(!['GET','HEAD','OPTIONS'].includes(req.method) && req.get('X-Mana-Request')!=='1') {res.status(403).json({error:'En-tête de protection CSRF manquant.'});return;}
   const origin=req.get('origin');
   if(origin && origin!== config.origin){res.status(403).json({error:'Origine refusée.'});return;}
   res.set('Cache-Control','no-store');next();
  });
- const authLimiter=rateLimit({windowMs:15*60000,limit:25});
- app.post('/api/auth/invitation',authLimiter,(req,res)=>{
-  const {token}=z.object({token:z.string().length(64)}).parse(req.body);
-  if(!validInvitation(db,token)){res.status(403).json({error:'Invitation invalide, expirée ou révoquée.'});return;}
-  res.cookie('invitation',token,{httpOnly:true,sameSite:'strict',secure:config.production,maxAge:3600000,path:'/'});
-  res.json({ok:true});
+ // Reject unauthenticated API requests before reading their JSON bodies. The
+ // three authentication endpoints are public, so give them a much smaller cap.
+ app.use('/api',(req,res,next)=>{
+  if(['/auth/register','/auth/login'].includes(req.path.replace(/\/+$/,''))){next();return;}
+  if(!currentUser(req)){res.status(401).json({error:'Connectez-vous pour continuer.'});return;}
+  next();
  });
- const currentUser=(req:express.Request)=>db.prepare('SELECT u.id,u.username FROM sessions s JOIN users u ON u.id=s.user_id JOIN site_access a ON a.user_id=u.id AND a.allowed=1 WHERE s.token=? AND s.expires>?').get(digest(sessionToken(req)),Date.now());
+ app.use('/api',(req,res,next)=>{
+  const authentication=['/auth/register','/auth/login'].includes(req.path.replace(/\/+$/,''));
+  // Keep a transport-level cap, with room for large text imports and JSON escaping.
+  express.json({limit:authentication?'16kb':'64mb'})(req,res,next);
+ });
+ const authLimiter=rateLimit({windowMs:15*60000,limit:25});
  for(const action of ['register','login'])app.post(`/api/auth/${action}`,authLimiter,async(req,res)=>{
-  const invitation=action==='register'?validInvitation(db,inviteToken(req)||String(req.body?.invitation??'')):undefined;
-  if(action==='register'&&!invitation){res.status(403).json({error:'Invitation requise ou invalide.'});return;}
   const {username,password}=credentials.parse(req.body);
   let user=db.prepare('SELECT * FROM users WHERE username=?').get(username) as any;
   if(action==='register'){
@@ -67,12 +73,9 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
    const passwordHash=await hash(password,12);
    user={id:randomUUID(),username};
    try{transaction(db,()=>{
-    if(!validInvitation(db,inviteToken(req)||String(req.body?.invitation??'')))throw new Error('Invitation indisponible');
     db.prepare('INSERT INTO users VALUES (?,?,?)').run(user.id,username,passwordHash);
     db.prepare('INSERT INTO site_access VALUES (?,1)').run(user.id);
-    db.prepare('UPDATE invitations SET used_by=? WHERE id=?').run(user.id,invitation!.id);
-   });}catch{res.status(409).json({error:'Inscription impossible : pseudonyme ou invitation indisponible.'});return;}
-   res.clearCookie('invitation',{path:'/'});
+   });}catch{res.status(409).json({error:'Inscription impossible : ce pseudonyme est déjà utilisé.'});return;}
   }else if(!await compare(password,user?.password??'$2b$12$7iWRquaoMRKoBIEqP77hGOfsgagV79COapVIltNp/xAOPW2FL7Bze') || !user){res.status(401).json({error:'Identifiants incorrects.'});return;}
   if(!db.prepare('SELECT user_id FROM site_access WHERE user_id=? AND allowed=1').get(user.id)){res.status(403).json({error:'Accès non autorisé.'});return;}
   const token=randomBytes(32).toString('hex');
@@ -90,7 +93,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  app.get('/api/cards/search',async(req,res)=>{const q=z.string().trim().max(200).parse(req.query.q??'');try{res.json(await search(q));}catch(error){if(error instanceof ScryfallError){scryfallFailure(error,res);return;}res.status(503).json({error:'Recherche indisponible. Réessayez.'});}});
  app.get('/api/cards/:id/details',async(req,res)=>{
   const id=z.string().uuid().parse(req.params.id);const foil=req.query.foil==='1';
-  try{const card=await details(id);const pricing=await previewPrices(()=>prices(card.versions,foil),card.versions,foil);const stored=db.prepare('SELECT * FROM cards WHERE oracle_id=?').get(id) as Card|undefined;const localized=stored?(await translate([stored]))[0]:undefined;res.json({...card,...pricing,warning:[card.warning,pricing.warning].filter(Boolean).join(' ')||null,fr_name:localized?.fr_name??null});}catch(error){if(error instanceof ScryfallError){scryfallFailure(error,res);return;}res.status(503).json({error:'Le chargement des versions a échoué. Réessaie.'});}
+  try{const card=await details(id);const pricing=await previewPrices(()=>prices(card.versions,foil),card.versions,foil);const stored=db.prepare('SELECT * FROM cards WHERE oracle_id=?').get(id) as Card|undefined;const localized=stored?(await translate([stored]))[0]:undefined;res.json({...card,...pricing,warning:[card.warning,pricing.warning].filter(Boolean).join(' ')||null,fr_name:localized?.fr_name??null,fr_type_line:localized?.fr_type_line??null});}catch(error){if(error instanceof ScryfallError){scryfallFailure(error,res);return;}res.status(503).json({error:'Le chargement des versions a échoué. Réessaie.'});}
  });
  app.post('/api/cards/localize',async(req,res)=>{
   const {ids}=z.object({ids:z.array(z.string().uuid()).max(100)}).parse(req.body);
@@ -99,15 +102,18 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   res.json(await translate(rows));
  });
  app.post('/api/cards/prices',async(req,res)=>{
-  const {cards}=z.object({cards:z.array(z.object({oracle_id:z.string().uuid(),set_code:z.string().max(20).nullable().optional(),collector_number:z.string().max(30).nullable().optional(),foil:z.union([z.boolean(),z.number().int().min(0).max(1)]).optional(),finish:z.enum(['nonfoil','foil','etched']).optional()})).max(100)}).parse(req.body);
+  const {cards}=z.object({cards:z.array(z.object({oracle_id:z.string().uuid(),set_code:z.string().max(20).nullable().optional(),collector_number:z.string().max(30).nullable().optional(),foil:z.union([z.boolean(),z.number().int().min(0).max(1)]).optional(),finish:z.enum(['nonfoil','foil','etched']).optional(),average_low:z.boolean().optional()})).max(100)}).parse(req.body);
   const lookup=db.prepare('SELECT name FROM cards WHERE oracle_id=?');const lines:InventoryLine[]=[];
   for(const card of cards){const stored=lookup.get(card.oracle_id);if(stored)lines.push({...card,foil:Number(card.finish?card.finish==='foil':card.foil??false),name:String(stored.name),quantity:1});}
-  const result=await valueInventory([...new Map(lines.map(line=>[lineKey(line),line])).values()]);
-  res.json({rows:result.rows.map(row=>({key:lineKey(row),unit_price:row.unit_price,estimated:row.estimated,source:row.source,observations:row.observations,fx_date:row.fx_date,fx_rate:row.fx_rate,stale:row.stale})),updated_at:result.updated_at,warning:result.warning});
+  const averageLines=lines.filter(line=>(line as any).average_low),exactLines=lines.filter(line=>!(line as any).average_low);
+  const exact=await valueInventory([...new Map(exactLines.map(line=>[lineKey(line),line])).values()]);
+  const averages=await allEditionLowAverages(db,averageLines,prices);
+  res.json({rows:[...exact.rows.map(row=>({key:lineKey(row),unit_price:row.unit_price,estimated:row.estimated,source:row.source,observations:row.observations,fx_date:row.fx_date,fx_rate:row.fx_rate,stale:row.stale})),...new Map(averageLines.map(line=>{const finish=line.finish??(line.foil?'foil':'nonfoil'),key=averageLowPriceKey(line.oracle_id,finish);return [key,{key,unit_price:null,low_average:averages.get(key)??null,estimated:false,source:averages.get(key)==null?null:'Cardmarket'}];})).values()],updated_at:exact.updated_at,warning:exact.warning});
  });
  app.get('/api/cards/filter',async(req,res)=>{
   const q=z.string().trim().min(1).max(4000).parse(req.query.q);const page=z.coerce.number().int().min(1).max(1000).parse(req.query.page??1);
-  try{res.json(await catalog(q,page));}catch(error){if(error instanceof ScryfallError){scryfallFailure(error,res);return;}res.status(503).json({error:'Recherche avancée indisponible. Réessaie.'});}
+  const allLanguages=z.enum(['true','false']).parse(req.query.allLanguages??'false')==='true';
+  try{res.json(await catalog(q,page,'prints',allLanguages));}catch(error){if(error instanceof ScryfallError){scryfallFailure(error,res);return;}res.status(503).json({error:'Recherche avancée indisponible. Réessaie.'});}
  });
  app.post('/api/cards/filter-list',async(req,res)=>{
   const {query,ids}=z.object({query:z.string().trim().max(4000),ids:z.array(z.string().uuid()).max(30000)}).parse(req.body);
@@ -117,6 +123,15 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  app.patch('/api/settings',(req,res)=>{
   const input=z.object({collection_target:z.number().int().min(0).max(1000000).nullable()}).parse(req.body);
   db.prepare('INSERT INTO user_settings(user_id,collection_target) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET collection_target=excluded.collection_target').run(res.locals.user.id,input.collection_target);res.json({ok:true});
+ });
+ app.post('/api/account/password',async(req,res)=>{
+  const input=z.object({current_password:z.string().min(1).max(72),password:z.string().min(12).max(72).refine(value=>Buffer.byteLength(value,'utf8')<=72)}).parse(req.body);
+  const userId=res.locals.user.id,stored=db.prepare('SELECT password FROM users WHERE id=?').get(userId) as any;
+  if(!stored||!await compare(input.current_password,String(stored.password))){res.status(403).json({error:'Mot de passe actuel incorrect.'});return;}
+  const passwordHash=await hash(input.password,12);
+  db.prepare('UPDATE users SET password=? WHERE id=?').run(passwordHash,userId);
+  db.prepare('DELETE FROM sessions WHERE user_id=? AND token<>?').run(userId,digest(sessionToken(req)));
+  res.json({ok:true});
  });
  app.post('/api/account/reset',async(req,res)=>{
   const input=z.object({password:z.string().min(1).max(72),confirmation:z.literal('RESET')}).parse(req.body);const userId=res.locals.user.id;
@@ -154,16 +169,65 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   if(target==='deck'&&!db.prepare('SELECT id FROM decks WHERE id=? AND user_id=?').get(deckId!,userId)){res.status(404).json({error:'Deck introuvable.'});return;}
   if(target==='matches'){
    const current=getMatches(db,userId),quotes=new Map(result.rows.map(r=>[lineKey(r),r]));
-   const decorate=(rows:any[])=>rows.map(m=>{const quote=quotes.get(lineKey({...m,quantity:m.exchange_quantity}));const unit=quote?.unit_price??null;return {...m,unit_price:unit,exchange_value:unit==null?null:Math.round(unit*100)*m.exchange_quantity/100,wanted_value:unit==null?null:Math.round(unit*100)*m.wanted/100,available_value:unit==null?null:Math.round(unit*100)*m.available/100,estimated:true};});
+   const decorate=(rows:any[])=>rows.map(m=>{const quote=quotes.get(lineKey({...m,quantity:m.exchange_quantity}));const unit=quote?.low_price??null;return {...m,unit_price:unit,exchange_value:unit==null?null:Math.round(unit*100)*m.exchange_quantity/100,wanted_value:unit==null?null:Math.round(unit*100)*m.wanted/100,available_value:unit==null?null:Math.round(unit*100)*m.available/100,estimated:true};});
    res.json({receive:decorate(current.receive),give:decorate(current.give),updated_at:result.updated_at,warning:result.warning,basis:result.basis});return;
   }
   await translate(result.rows as unknown as Card[],false);res.json(result);
  });
  app.get('/api/me',(_req,res)=>res.json(res.locals.user));
  app.post('/api/auth/logout',(req,res)=>{db.prepare('DELETE FROM sessions WHERE token=?').run(digest(sessionToken(req)));res.clearCookie('session',{path:'/'});res.json({ok:true});});
+ app.get('/api/collection/groups',(_req,res)=>res.json(db.prepare('SELECT g.id,g.name,g.created_at,count(DISTINCT e.oracle_id) AS count,coalesce(sum(e.quantity),0) AS quantity FROM collection_groups g LEFT JOIN collection_entries e ON e.group_id=g.id AND e.user_id=g.user_id WHERE g.user_id=? GROUP BY g.id ORDER BY g.name COLLATE NOCASE').all(res.locals.user.id)));
+ app.post('/api/collection/groups',(req,res)=>{const {name}=z.object({name:z.string().trim().min(1).max(100)}).parse(req.body);const id=randomUUID();try{db.prepare('INSERT INTO collection_groups(id,user_id,name) VALUES (?,?,?)').run(id,res.locals.user.id,name);}catch{res.status(409).json({error:'Un groupe porte déjà ce nom.'});return;}res.status(201).json({id,name});});
+ app.delete('/api/collection/groups/:id',(req,res)=>{const result=db.prepare('DELETE FROM collection_groups WHERE id=? AND user_id=?').run(req.params.id,res.locals.user.id);if(!result.changes){res.status(404).json({error:'Groupe introuvable.'});return;}res.json({ok:true});});
+ app.post('/api/deckbuilder/availability',(req,res)=>{
+  const {oracle_ids}=z.object({oracle_ids:z.array(z.string().uuid()).max(500)}).parse(req.body),userId=res.locals.user.id;
+  if(!oracle_ids.length){res.json([]);return;}
+  const marks=oracle_ids.map(()=>'?').join(','),owned=db.prepare(`SELECT oracle_id,quantity FROM collection WHERE user_id=? AND oracle_id IN (${marks})`).all(userId,...oracle_ids) as {oracle_id:string;quantity:number}[];
+  const accessibleFriends=db.prepare(`SELECT u.id AS friend_id,u.username FROM friendships f JOIN users u ON u.id=CASE WHEN f.requester=? THEN f.recipient ELSE f.requester END JOIN site_access a ON a.user_id=u.id AND a.allowed=1 WHERE f.status='accepted' AND (f.requester=? OR f.recipient=?)`).all(userId,userId,userId) as {friend_id:string;username:string}[];
+  const friendCounts=accessibleFriends.length?db.prepare(`SELECT user_id AS friend_id,oracle_id,quantity FROM collection WHERE user_id IN (${accessibleFriends.map(()=>'?').join(',')}) AND oracle_id IN (${marks})`).all(...accessibleFriends.map(friend=>friend.friend_id),...oracle_ids) as {friend_id:string;oracle_id:string;quantity:number}[]:[];
+  const mana=db.prepare(`SELECT c.oracle_id,c.type_line,(SELECT json_extract(p.data,'$.mana_cost') FROM card_printings p WHERE p.oracle_id=c.oracle_id AND json_valid(p.data) ORDER BY p.released_at DESC,p.id LIMIT 1) AS mana_cost,(SELECT json_extract(p.data,'$.cmc') FROM card_printings p WHERE p.oracle_id=c.oracle_id AND json_valid(p.data) ORDER BY p.released_at DESC,p.id LIMIT 1) AS cmc,(SELECT json_extract(p.data,'$.legalities.commander') FROM card_printings p WHERE p.oracle_id=c.oracle_id AND json_valid(p.data) ORDER BY p.released_at DESC,p.id LIMIT 1) AS commander_legality,(SELECT json_extract(p.data,'$.color_identity') FROM card_printings p WHERE p.oracle_id=c.oracle_id AND json_valid(p.data) ORDER BY p.released_at DESC,p.id LIMIT 1) AS color_identity,(SELECT json_extract(p.data,'$.oracle_text') FROM card_printings p WHERE p.oracle_id=c.oracle_id AND json_valid(p.data) ORDER BY p.released_at DESC,p.id LIMIT 1) AS oracle_text FROM cards c WHERE oracle_id IN (${marks})`).all(...oracle_ids) as {oracle_id:string;type_line:string;mana_cost:string|null;cmc:number|null;commander_legality:string|null;color_identity:string|null;oracle_text:string|null}[];
+  const ownById=new Map(owned.map(row=>[row.oracle_id,row.quantity])),manaById=new Map(mana.map(row=>[row.oracle_id,row]));
+  const friendById=new Map<string,{friend_id:string;name:string;quantity:number}[]>();
+  for(const row of friendCounts){const friend=accessibleFriends.find(value=>value.friend_id===row.friend_id);if(!friend)continue;let owners=friendById.get(row.oracle_id);if(!owners)friendById.set(row.oracle_id,owners=[]);owners.push({friend_id:friend.friend_id,name:friend.username,quantity:row.quantity});}
+  res.json(oracle_ids.map(oracle_id=>{const meta=manaById.get(oracle_id);let color_identity:string[]=[];try{color_identity=meta?.color_identity?JSON.parse(meta.color_identity):[];}catch{}const oracle_text=meta?.oracle_text??'';return {oracle_id,owned_quantity:ownById.get(oracle_id)??0,mana_cost:meta?.mana_cost??null,cmc:meta?.cmc??null,type_line:meta?.type_line??'',commander_legality:meta?.commander_legality??null,color_identity,oracle_text,commander_candidate:/\bLegendary\b.*\bCreature\b/i.test(meta?.type_line??'')||/can be your commander/i.test(oracle_text),friend_owners:friendById.get(oracle_id)??[]};}));
+ });
+ app.post('/api/deckbuilder/save',(req,res)=>{
+  const {name,cards,commander_id}=z.object({name:z.string().trim().min(1).max(100),cards:z.array(z.object({oracle_id:z.string().uuid(),quantity:z.number().int().min(1).max(9999)})).min(1).max(500),commander_id:z.string().uuid().optional()}).parse(req.body),userId=res.locals.user.id,id=randomUUID();
+  const unique=new Map<string,number>();for(const card of cards)unique.set(card.oracle_id,(unique.get(card.oracle_id)??0)+card.quantity);
+  if([...unique.values()].some(quantity=>quantity>9999)){res.status(400).json({error:'La quantité totale d’une carte dépasse 9999.'});return;}
+  const exists=db.prepare(`SELECT count(*) AS count FROM cards WHERE oracle_id IN (${[...unique.keys()].map(()=>'?').join(',')})`).get(...unique.keys()) as {count:number};
+  if(Number(exists.count)!==unique.size){res.status(400).json({error:'Une ou plusieurs cartes ne sont plus disponibles dans le catalogue.'});return;}
+  if(commander_id&&!unique.has(commander_id)){res.status(400).json({error:'Le commandant doit faire partie de la liste.'});return;}
+  transaction(db,()=>{db.prepare('INSERT INTO decks(id,user_id,name) VALUES (?,?,?)').run(id,userId,name);const insert=db.prepare("INSERT INTO deck_cards(deck_id,oracle_id,section,quantity,finish) VALUES (?,?,?,?,'nonfoil')");for(const [oracleId,quantity] of unique)insert.run(id,oracleId,oracleId===commander_id?'commander':'mainboard',quantity);});
+  res.status(201).json({id,name});
+ });
+ app.post('/api/deckbuilder/suggestions',async(req,res)=>{
+  const input=z.object({commander_id:z.string().uuid(),cards:z.array(z.object({oracle_id:z.string().uuid(),quantity:z.number().int().min(1).max(9999)})).min(1).max(500)}).parse(req.body);
+  const counts=new Map<string,number>();for(const card of input.cards)counts.set(card.oracle_id,(counts.get(card.oracle_id)??0)+card.quantity);
+  if(!counts.has(input.commander_id)){res.status(400).json({error:'Le commandant doit figurer dans la liste.'});return;}
+  const rows=db.prepare(`SELECT oracle_id,name,type_line,image FROM cards WHERE oracle_id IN (${[...counts.keys()].map(()=>'?').join(',')})`).all(...counts.keys()) as {oracle_id:string;name:string;type_line:string;image:string|null}[],byId=new Map(rows.map(row=>[row.oracle_id,row]));
+  if(rows.length!==counts.size){res.status(400).json({error:'Une carte de la liste est absente du catalogue.'});return;}
+  const commander=byId.get(input.commander_id)!;
+  const deckRows=db.prepare(`SELECT c.oracle_id,c.name,c.type_line,c.image,coalesce(json_extract(p.data,'$.oracle_text'),json_extract(p.data,'$.card_faces[0].oracle_text'),'') || char(10) || coalesce(json_extract(p.data,'$.card_faces[1].oracle_text'),'') AS oracle_text FROM cards c LEFT JOIN card_printings p ON p.id=(SELECT p2.id FROM card_printings p2 WHERE p2.oracle_id=c.oracle_id ORDER BY p2.released_at DESC,p2.id DESC LIMIT 1) WHERE c.oracle_id IN (${[...counts.keys()].map(()=>'?').join(',')})`).all(...counts.keys()) as SynergyCardData[];
+  const commanderPrinting=db.prepare("SELECT json_extract(data,'$.color_identity') AS color_identity FROM card_printings WHERE oracle_id=? ORDER BY released_at DESC,id DESC LIMIT 1").get(input.commander_id) as {color_identity:string|null}|undefined;
+  let identity:string[]=[];try{identity=commanderPrinting?.color_identity?JSON.parse(commanderPrinting.color_identity):[];}catch{}
+  const pool=db.prepare("SELECT c.oracle_id,c.name,c.type_line,c.image,coalesce(json_extract(p.data,'$.oracle_text'),json_extract(p.data,'$.card_faces[0].oracle_text'),'') || char(10) || coalesce(json_extract(p.data,'$.card_faces[1].oracle_text'),'') AS oracle_text,json_extract(p.data,'$.color_identity') AS color_identity,json_extract(p.data,'$.colors') AS colors,json_extract(p.data,'$.cmc') AS cmc,json_extract(p.data,'$.mana_cost') AS mana_cost FROM cards c LEFT JOIN card_printings p ON p.id=(SELECT p2.id FROM card_printings p2 WHERE p2.oracle_id=c.oracle_id ORDER BY p2.released_at DESC,p2.id DESC LIMIT 1) WHERE c.oracle_id NOT IN ("+[...counts.keys()].map(()=>'?').join(',')+")").all(...counts.keys()) as (SynergyCardData&{color_identity:string|null;colors:string|null;cmc:number|null;mana_cost:string|null})[];
+  const legalPool=pool.filter(card=>{try{const colors=card.color_identity?JSON.parse(card.color_identity):[];return colors.every((color:string)=>identity.includes(color));}catch{return false;}});
+  const poolById=new Map(pool.map(card=>[card.oracle_id,card]));
+  const synergies=rankSynergyCandidates(deckRows,legalPool,80);
+  const combos=await commanderSuggestions({id:commander.oracle_id,name:commander.name},[...counts].filter(([id])=>id!==input.commander_id).map(([id,quantity])=>({id,name:byId.get(id)!.name,quantity})),counts.keys()).catch(()=>[]);
+  const combined=new Map<string,any>(synergies.map(card=>[card.oracle_id,{...card,kind:'synergy',combo_count:0,combo_url:'',combo_evidence:[],score:card.synergy_score,source:'Scryfall + Commander Spellbook'}]));
+  for(const card of combos){const prior=combined.get(card.oracle_id),metadata=poolById.get(card.oracle_id);if(prior){prior.kind='combo_and_synergy';prior.combo_count=card.combo_count;prior.combo_url=card.combo_url;prior.combo_evidence=card.combo_evidence;prior.source='Commander Spellbook + Scryfall';}else combined.set(card.oracle_id,{...metadata,...card,cmc:metadata?.cmc??null,mana_cost:metadata?.mana_cost??null,colors:metadata?.colors??null,color_identity:metadata?.color_identity??null,kind:'combo',synergy_score:0,synergy_links:[],synergy_source:'Commander Spellbook'});}
+  const suggestions=[...combined.values()].sort((a,b)=>b.synergy_score-a.synergy_score||b.combo_count-a.combo_count||a.name.localeCompare(b.name,'en')).slice(0,80);
+  if(!suggestions.length){res.json({source:['Scryfall','Commander Spellbook'],cards:[]});return;}
+  transaction(db,()=>{const insert=db.prepare('INSERT OR IGNORE INTO cards(oracle_id,name,image,type_line) VALUES (?,?,?,?)');for(const card of suggestions)insert.run(card.oracle_id,card.name,card.image,card.type_line);});
+  res.json({source:['Scryfall','Commander Spellbook'],cards:suggestions});
+ });
  for(const table of ['collection','wishlist'] as const){
-  app.get(`/api/${table}`,(_req,res)=>{
-   const cards=db.prepare(`SELECT c.*,t.quantity${table==='collection'?",(SELECT group_concat(e.id||':'||e.quantity) FROM collection_entries e WHERE e.user_id=t.user_id AND e.oracle_id=t.oracle_id) AS entries_revision":''} FROM ${table} t JOIN cards c USING(oracle_id) WHERE user_id=? ORDER BY c.name`).all(res.locals.user.id) as unknown as Card[];
+  app.get(`/api/${table}`,(req,res)=>{
+   let cards:Card[];
+   if(table==='collection'&&req.query.groupId){const groupId=z.string().min(1).max(100).parse(req.query.groupId);if(!db.prepare('SELECT id FROM collection_groups WHERE id=? AND user_id=?').get(groupId,res.locals.user.id)){res.status(404).json({error:'Groupe introuvable.'});return;}cards=db.prepare(`SELECT c.*,sum(e.quantity) AS quantity,(SELECT json_extract(p.data,'$.mana_cost') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS mana_cost,(SELECT json_extract(p.data,'$.cmc') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS cmc,(SELECT json_extract(p.data,'$.colors') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS colors,(SELECT json_extract(p.data,'$.color_identity') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS color_identity,group_concat(e.id||':'||e.quantity) AS entries_revision,? AS group_id FROM collection_entries e JOIN collection t ON t.user_id=e.user_id AND t.oracle_id=e.oracle_id JOIN cards c USING(oracle_id) WHERE e.user_id=? AND e.group_id=? GROUP BY c.oracle_id ORDER BY c.name`).all(groupId,res.locals.user.id,groupId) as unknown as Card[];
+   }else cards=db.prepare(`SELECT c.*,t.quantity,(SELECT json_extract(p.data,'$.mana_cost') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS mana_cost,(SELECT json_extract(p.data,'$.cmc') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS cmc,(SELECT json_extract(p.data,'$.colors') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS colors,(SELECT json_extract(p.data,'$.color_identity') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS color_identity${table==='collection'?",(SELECT group_concat(e.id||':'||e.quantity) FROM collection_entries e WHERE e.user_id=t.user_id AND e.oracle_id=t.oracle_id) AS entries_revision":''} FROM ${table} t JOIN cards c USING(oracle_id) WHERE user_id=? ORDER BY c.name`).all(res.locals.user.id) as unknown as Card[];
    // Localization is a best-effort enhancement. Do not hold inventory reads
    // open while Scryfall is slow; localizer fills its cache in the background.
    void translate(cards,false);
@@ -208,7 +272,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
    res.json(decks.map(d=>({...d,card_count:db.prepare('SELECT coalesce(sum(quantity),0) AS n FROM deck_cards WHERE deck_id=?').get(d.id)?.n,
     missing_count:db.prepare(`SELECT coalesce(sum(max(0,needed-coalesce(o.quantity,0))),0) AS n FROM (SELECT oracle_id,sum(quantity) AS needed FROM deck_cards WHERE deck_id=? AND section<>'maybeboard' GROUP BY oracle_id) dc LEFT JOIN collection o ON o.oracle_id=dc.oracle_id AND o.user_id=?`).get(d.id,res.locals.user.id)?.n})));return;
   }
-  res.json(await Promise.all(decks.map(async d=>({...d,cards:await translate(db.prepare('SELECT c.*,dc.id,dc.section,dc.quantity,dc.set_code,dc.collector_number,dc.foil,dc.finish,dc.language,dc.condition FROM deck_cards dc JOIN cards c USING(oracle_id) WHERE dc.deck_id=? ORDER BY dc.id').all(d.id) as unknown as Card[],false)}))));
+  res.json(await Promise.all(decks.map(async d=>({...d,cards:await translate(db.prepare("SELECT c.*,dc.id,dc.section,dc.quantity,dc.set_code,dc.collector_number,dc.foil,dc.finish,dc.language,dc.condition,(SELECT json_extract(p.data,'$.mana_cost') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS mana_cost,(SELECT json_extract(p.data,'$.colors') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS colors FROM deck_cards dc JOIN cards c USING(oracle_id) WHERE dc.deck_id=? ORDER BY dc.id").all(d.id) as unknown as Card[],false)}))));
  });
  app.get('/api/decks/:id/cards',async(req,res)=>{
   if(!db.prepare('SELECT id FROM decks WHERE id=? AND user_id=?').get(req.params.id,res.locals.user.id)){res.status(404).json({error:'Deck introuvable.'});return;}
@@ -217,7 +281,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   const text=(key:string)=>z.string().max(200).parse(req.query[key]??'').trim();
   const name=text('name'),type=text('type'),set=text('set'),section=text('section'),foil=text('foil'),oracle=text('oracle');
   if(name){conditions.push("instr(normalized_name(coalesce(l.fr_name,'')||' '||c.name),?)>0");args.push(normalizeName(name));}
-  if(type){conditions.push('instr(normalized_name(c.type_line),?)>0');args.push(normalizeName(type));}
+  if(type)for(const aliases of cardTypeFilterGroups(type)){conditions.push('('+aliases.map(()=>"instr(normalized_name(c.type_line),?)>0").join(' OR ')+')');args.push(...aliases.map(normalizeName));}
   if(set){conditions.push('lower(dc.set_code)=?');args.push(set.toLowerCase());}
   if(section){conditions.push('dc.section=?');args.push(section);}
   if(foil){conditions.push('dc.foil=?');args.push(z.coerce.number().int().min(0).max(1).parse(foil));}
@@ -227,7 +291,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   const priceFilters={priceMin:text('priceMin'),priceMax:text('priceMax'),priceStatus:text('priceStatus')},sort=text('sort');
   for(const bound of [priceFilters.priceMin,priceFilters.priceMax])if(bound)z.coerce.number().finite().min(0).parse(bound);
   z.enum(['','priced','unpriced']).parse(priceFilters.priceStatus);z.enum(['','name','price-asc','price-desc']).parse(sort);
-  const select='SELECT c.*,dc.id,dc.section,dc.quantity,dc.set_code,dc.collector_number,dc.foil,dc.finish,dc.language,dc.condition '+from+' ORDER BY dc.id';
+  const select="SELECT c.*,dc.id,dc.section,dc.quantity,dc.set_code,dc.collector_number,dc.foil,dc.finish,dc.language,dc.condition,(SELECT json_extract(p.data,'$.mana_cost') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS mana_cost,(SELECT json_extract(p.data,'$.colors') FROM card_printings p WHERE p.oracle_id=c.oracle_id ORDER BY p.released_at DESC LIMIT 1) AS colors "+from+' ORDER BY dc.id';
   const advanced=z.string().max(4000).parse(req.query.advanced??'');
   if(advanced||sort.startsWith('price-')||Object.values(priceFilters).some(Boolean)){
    let all=db.prepare(select).all(...args) as unknown as (Card & InventoryLine)[];
@@ -247,11 +311,13 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   res.json({cards:await translate(cards as unknown as Card[]),total:counts?.n,quantity:counts?.quantity});
  });
  for(const target of ['decks','collection','wishlist'] as const)app.post(`/api/${target}/import`,async(req,res)=>{
-  const input=z.object({name:z.string().trim().max(100).optional(),deckId:z.string().optional(),text:z.string().min(1),format:z.enum(['auto','text','csv']).default('auto')}).parse(req.body);
-  if(Buffer.byteLength(input.text,'utf8')>MAX_IMPORT_BYTES){res.status(413).json({error:'Oups, cette liste dépasse 10 Mo ! Choisis un fichier plus léger.'});return;}
+  const input=z.object({name:z.string().trim().max(100).optional(),deckId:z.string().optional(),groupId:z.string().optional(),groupName:z.string().trim().min(1).max(100).optional(),text:z.string().min(1),format:z.enum(['auto','text','csv']).default('auto')}).refine(value=>!(value.groupId&&value.groupName),{message:'Choisissez un groupe existant ou un nouveau groupe.'}).parse(req.body);
   const userId=res.locals.user.id,startGeneration=generation(res.locals.user.id);
   if(target==='decks' && input.deckId && !db.prepare('SELECT id FROM decks WHERE id=? AND user_id=?').get(input.deckId,userId)){res.status(404).json({error:'Deck introuvable.'});return;}
   if(target==='decks' && !input.deckId && !input.name){res.status(400).json({error:'Nom de deck requis.'});return;}
+  if(target!=='collection'&&(input.groupId||input.groupName)){res.status(400).json({error:'Les groupes sont réservés à la collection.'});return;}
+  if(target==='collection'&&input.groupId&&!db.prepare('SELECT id FROM collection_groups WHERE id=? AND user_id=?').get(input.groupId,userId)){res.status(404).json({error:'Groupe introuvable.'});return;}
+  if(target==='collection'&&input.groupName&&db.prepare('SELECT id FROM collection_groups WHERE user_id=? AND name=?').get(userId,input.groupName)){res.status(409).json({error:'Un groupe porte déjà ce nom.'});return;}
   const stream=req.get('Accept')==='application/x-ndjson';
   if(stream){res.set({'Content-Type':'application/x-ndjson','X-Accel-Buffering':'no'});res.flushHeaders();}
   const emit=(value:unknown)=>{if(stream&&!res.destroyed)res.write(JSON.stringify(value)+'\n');};
@@ -299,14 +365,16 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   if(target!=='decks')for(const c of db.prepare(`SELECT oracle_id,quantity FROM ${target} WHERE user_id=?`).all(userId))collectionTotals.set(String(c.oracle_id),Number(c.quantity));
   const addCollection=db.prepare(`INSERT INTO ${target==='wishlist'?'wishlist':'collection'} VALUES (?,?,?) ON CONFLICT(user_id,oracle_id) DO UPDATE SET quantity=quantity+excluded.quantity`);
   const addDeck=db.prepare('INSERT INTO deck_cards(deck_id,oracle_id,section,quantity,set_code,collector_number,foil,raw_line,finish,language,condition,scryfall_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
-  const addEntry=db.prepare('INSERT INTO collection_entries(user_id,oracle_id,quantity,set_code,collector_number,foil,finish,language,condition,scryfall_id) VALUES (?,?,?,?,?,?,?,?,?,?)');
+  const addEntry=db.prepare('INSERT INTO collection_entries(user_id,oracle_id,quantity,set_code,collector_number,foil,finish,language,condition,scryfall_id,group_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+  let groupId=input.groupId;
   transaction(db,()=>{
    for(const r of resolved){
     if(target!=='decks'){
      const total=(collectionTotals.get(r.card.oracle_id)??0)+r.quantity;
      if(total>9999){errors.push({line:r.line,section:r.section,text:r.text,message:`Le total dépasse 9999 exemplaires dans la ${target==='wishlist'?'wishlist':'collection'}.`,retryText:parsed.format==='csv'?r.csv_record??r.text:`${r.section}\n${r.text}`});continue;}
+     if(target==='collection'&&input.groupName&&!groupId){groupId=randomUUID();db.prepare('INSERT INTO collection_groups(id,user_id,name) VALUES (?,?,?)').run(groupId,userId,input.groupName);}
      addCollection.run(userId,r.card.oracle_id,r.quantity);collectionTotals.set(r.card.oracle_id,total);
-     if(target==='collection'&&(r.set_code||r.scryfall_id))addEntry.run(userId,r.card.oracle_id,r.quantity,r.set_code,r.collector_number,Number(r.foil),r.finish??(r.foil?'foil':'nonfoil'),r.language??null,r.condition??null,r.scryfall_id??null);
+     if(target==='collection')addEntry.run(userId,r.card.oracle_id,r.quantity,r.set_code,r.collector_number,Number(r.foil),r.finish??(r.foil?'foil':'nonfoil'),r.language??null,r.condition??null,r.scryfall_id??null,groupId??null);
     }else{
      if(!imported && !input.deckId)db.prepare('INSERT INTO decks(id,user_id,name) VALUES (?,?,?)').run(id,userId,input.name!);
      addDeck.run(id,r.card.oracle_id,r.section,r.quantity,r.set_code,r.collector_number,Number(r.foil),r.raw_line,r.finish??(r.foil?'foil':'nonfoil'),r.language??null,r.condition??null,r.scryfall_id??null);
@@ -343,7 +411,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   if(res.headersSent){res.write(JSON.stringify({type:'error',error:'Import interrompu. Vérifie les decks enregistrés avant de réessayer.'})+'\n');res.end();return;}
   if(error instanceof ScryfallError){scryfallFailure(error,res);return;}
   if(error instanceof z.ZodError){res.status(400).json({error:'Données invalides.',details:error.issues});return;}
-  if(error?.type==='entity.too.large'){res.status(413).json({error:'Oups, ce fichier est trop gros : maximum 10 Mo pour la decklist.'});return;}
+  if(error?.type==='entity.too.large'){res.status(413).json({error:'Requête trop volumineuse : le serveur accepte les corps JSON jusqu’à 64 Mo.'});return;}
   if(error?.type==='entity.parse.failed'){res.status(400).json({error:'Le texte envoyé est illisible. Réessaie.'});return;}
   console.error('Erreur interne du serveur.');res.status(500).json({error:'La requête a échoué. Réessayez.'});
  });
@@ -351,10 +419,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
  app.use((req,res,next)=>{
   res.set('Cache-Control','no-store');
   if(req.path==='/login'||req.path.startsWith('/assets/')||(!config.production&&(/^\/(src\/|@|node_modules\/)/.test(req.path)||req.path==='/vite.svg'))){next();return;}
-  if(req.path==='/register'){
-   if(validInvitation(db,inviteToken(req))){next();return;}
-   res.status(403).type('text').send('Invitation requise. Rendez-vous sur /login.');return;
-  }
+  if(req.path==='/register'){next();return;}
   if(currentUser(req)){next();return;}
   if(req.path==='/'){res.redirect('/login');return;}
   res.status(403).type('text').send('Accès privé. Connectez-vous sur /login.');

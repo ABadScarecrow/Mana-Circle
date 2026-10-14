@@ -28,7 +28,7 @@ test('Scryfall EUR fallback contributes to inventory totals as an explicitly est
 test('exchange values respect accepted friends and min(wanted, available)',async()=>{
  const db=openDatabase(':memory:');const original=globalThis.fetch;
  save(db,{id:'p',oracle_id:'bolt',name:'Bolt',set:'m10',collector_number:'146',cardmarket_id:1});
- globalThis.fetch=async()=>new Response(JSON.stringify({createdAt:'2026-10-12',priceGuides:[{idProduct:1,avg:2}]}));
+ globalThis.fetch=async()=>new Response(JSON.stringify({createdAt:'2026-10-12',priceGuides:[{idProduct:1,low:0.5,avg:2}]}));
  const resolve=async()=>({oracle_id:'bolt',name:'Bolt',image:null,type_line:''}),app=createApp(db,resolve),alice=request.agent(app),bob=request.agent(app),stranger=request.agent(app);
  try{
   for(const [agent,username] of [[alice,'alice'],[bob,'bobby'],[stranger,'outsider']] as const)await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username,password:'correct horse battery'}).expect(200);
@@ -38,7 +38,7 @@ test('exchange values respect accepted friends and min(wanted, available)',async
   assert.equal((await requestValue()).body.receive.length,0);
   await alice.post('/api/friends').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'bobby'}).expect(201);
   const relation=(await bob.get('/api/friends')).body[0];await bob.patch('/api/friends/'+relation.id).set('X-Mana-Request','1').send({action:'accept'}).expect(200);
-  const value=(await requestValue()).body.receive;assert.equal(value.length,1);assert.equal(value[0].unit_price,2);assert.equal(value[0].exchange_value,6);assert.equal(value[0].wanted_value,8);assert.equal(value[0].available_value,6);
+  const value=(await requestValue()).body.receive;assert.equal(value.length,1);assert.equal(value[0].unit_price,0.5);assert.equal(value[0].exchange_value,1.5);assert.equal(value[0].wanted_value,2);assert.equal(value[0].available_value,1.5);
   const privateDeck=await bob.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Private',text:'1 Bolt'}).expect(201);
   await alice.post('/api/valuation').set('X-Mana-Request','1').send({target:'deck',deckId:privateDeck.body.id}).expect(404);
   await alice.delete('/api/friends/'+relation.id).set('X-Mana-Request','1').expect(200);

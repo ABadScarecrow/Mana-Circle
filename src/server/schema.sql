@@ -3,6 +3,8 @@ PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE, password TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS cards (oracle_id TEXT PRIMARY KEY, name TEXT NOT NULL, image TEXT, type_line TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS card_display_preferences (oracle_id TEXT PRIMARY KEY REFERENCES cards(oracle_id) ON DELETE CASCADE, lang TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS card_names (name TEXT PRIMARY KEY COLLATE NOCASE, oracle_id TEXT NOT NULL REFERENCES cards(oracle_id));
 CREATE TABLE IF NOT EXISTS collection (user_id TEXT NOT NULL REFERENCES users(id), oracle_id TEXT NOT NULL REFERENCES cards(oracle_id), quantity INTEGER NOT NULL CHECK(quantity BETWEEN 1 AND 9999), PRIMARY KEY(user_id,oracle_id));
 CREATE TABLE IF NOT EXISTS wishlist (user_id TEXT NOT NULL REFERENCES users(id), oracle_id TEXT NOT NULL REFERENCES cards(oracle_id), quantity INTEGER NOT NULL CHECK(quantity BETWEEN 1 AND 9999), PRIMARY KEY(user_id,oracle_id));
@@ -28,14 +30,20 @@ CREATE TABLE IF NOT EXISTS card_localizations (
  fr_name TEXT,
  checked_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS card_type_localizations (
+ oracle_id TEXT PRIMARY KEY REFERENCES cards(oracle_id) ON DELETE CASCADE,
+ fr_type_line TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS user_settings (user_id TEXT PRIMARY KEY REFERENCES users(id), collection_target INTEGER CHECK(collection_target>=0), reset_version INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS deck_settings (deck_id TEXT PRIMARY KEY REFERENCES decks(id) ON DELETE CASCADE, target_size INTEGER CHECK(target_size>=0));
 CREATE TABLE IF NOT EXISTS card_printings (id TEXT PRIMARY KEY, oracle_id TEXT NOT NULL REFERENCES cards(oracle_id), set_code TEXT, collector_number TEXT, released_at TEXT, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS printings_oracle ON card_printings(oracle_id,released_at);
 CREATE INDEX IF NOT EXISTS printings_set_number ON card_printings(set_code,collector_number);
+CREATE TABLE IF NOT EXISTS scryfall_bulk_import (type TEXT PRIMARY KEY, updated_at TEXT NOT NULL, imported_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS collection_groups (id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,name TEXT NOT NULL COLLATE NOCASE,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(user_id,name));
 CREATE TABLE IF NOT EXISTS collection_entries (
  id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, oracle_id TEXT NOT NULL, quantity INTEGER NOT NULL CHECK(quantity>0),
- set_code TEXT, collector_number TEXT, foil INTEGER NOT NULL DEFAULT 0, finish TEXT NOT NULL DEFAULT 'nonfoil', language TEXT, condition TEXT, scryfall_id TEXT,
+ set_code TEXT, collector_number TEXT, foil INTEGER NOT NULL DEFAULT 0, finish TEXT NOT NULL DEFAULT 'nonfoil', language TEXT, condition TEXT, scryfall_id TEXT, group_id TEXT REFERENCES collection_groups(id) ON DELETE SET NULL,
  FOREIGN KEY(user_id,oracle_id) REFERENCES collection(user_id,oracle_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS collection_entries_user ON collection_entries(user_id,oracle_id);

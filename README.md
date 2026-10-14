@@ -2,6 +2,8 @@
 
 Un petit outil entre amis : decks, collection, wishlist et échanges. React + TypeScript, Express et SQLite, dans un seul dépôt. Pas de service de base de données à installer.
 
+Voir aussi la [documentation du deckbuilder](docs/DECKBUILDER.md) : vues, contrôles de densité, courbe de mana et suggestions de combos.
+
 ## Site privé et hébergement EndeavourOS
 
 Prérequis : Node.js >=24.12, npm, Git et SQLite. Depuis le dépôt, ne jamais lancer le serveur avec sudo. Installer Cloudflare Tunnel depuis le dépôt Extra d’Arch ([paquet officiel](https://archlinux.org/packages/extra/x86_64/cloudflared/)) :
@@ -45,11 +47,40 @@ npm run admin -- revoke-user PSEUDO_A_REMPLACER
 npm run admin -- allow-user PSEUDO_EXISTANT
 ```
 
+### Catalogue Scryfall local
+
+Le catalogue « All Cards » est stocké sous `data/` (dossier ignoré par Git). Après avoir téléchargé le fichier bulk JSONL gzip, l’importer dans la même base SQLite que le serveur :
+
+```bash
+npm run import:scryfall -- data/scryfall-all-cards-AAAAMMJJHHMMSS.jsonl.gz
+```
+
+L’import est progressif et peut être relancé après interruption. Il alimente les noms et éditions locaux utilisés lors de la résolution des cartes et de l’affichage des versions ; un import déjà effectué est ignoré. Le marqueur d’import vient de l’horodatage de 14 chiffres présent dans le nom du fichier, ou du nom complet à défaut : utiliser un nouveau nom/version pour importer un nouveau snapshot. Les détails d’impression utilisent le snapshot local. Les recherches avancées en syntaxe Scryfall et les prix actualisés utilisent encore l’API. Le dump est quotidien : télécharger puis importer un fichier récent pour actualiser le catalogue.
+
+### Fonctionnalités récentes
+
+- **Deckbuilder Commander** : vues cartes/liste, contrôles de densité, courbe de mana, avertissements de légalité, suggestions de synergie et combos presque complètes fournies par Commander Spellbook. Les suggestions sont explicables et ne sont jamais ajoutées automatiquement. Voir [la documentation du deckbuilder](docs/DECKBUILDER.md) pour le fonctionnement, les limites du score et les tests associés.
+- **Collections par groupes** : création, consultation et suppression de groupes privés par compte. Les imports peuvent cibler un groupe existant ou en créer un ; le groupe par défaut reste la collection générale.
+- **Noms et éditions localisés** : les cartes et impressions privilégient le français puis l’anglais, avec repli sur les autres langues quand aucune impression FR/EN n’existe. La recherche avancée peut afficher toutes les langues.
+- **Recherche locale** : les noms du catalogue sont indexés pour retrouver directement les correspondances exactes, les préfixes et certaines suggestions approximatives sans appel Scryfall. Les requêtes avancées restent transmises à Scryfall.
+- **Prix** : les vues de prix distinguent les éditions et finitions disponibles. Le deckbuilder affiche aussi le prix bas moyen des impressions éligibles en français et en anglais ; il s’agit d’un indicateur de prix, pas d’une estimation de valeur de revente garantie.
+
+Les tests unitaires ciblés pour ces composants se trouvent dans `tests/` : notamment `deckbuilder-*.test.ts`, `commander-suggestions.test.ts`, `deckbuilder-synergy.test.ts`, `scryfall-bulk*.test.ts`, `language-display.test.ts`, `search-optimization.test.ts` et `all-edition-prices.test.ts`. Lancer `npm test` pour toute la suite unitaire.
+
 `invite` affiche un ID et un code aléatoire de 256 bits : transmettre uniquement le code à son destinataire, par un canal privé. Sa durée est de 72 heures par défaut, maximum 720 heures. Seul son SHA-256 est conservé. L’ami ouvre `/login`, saisit son invitation, puis accède à `/register` grâce à un cookie HttpOnly. Le code est consommé dans la même transaction que la création du compte. Aucun compte tiers n’est requis. Aux visites suivantes, le pseudonyme et le mot de passe suffisent.
 
 Révoquer une invitation déjà utilisée révoque aussi son compte et supprime ses sessions. `revoke-user` interdit immédiatement les prochaines requêtes, sans effacer les données. `allow-user` réautorise un compte existant ; les sessions supprimées ne sont pas restaurées. Une requête déjà en cours peut se terminer. Le libellé sert au suivi administratif et ne lie pas cryptographiquement le code à une identité : son porteur peut l’utiliser, donc ne pas le publier.
 
 ### Lancer le tunnel et la production
+
+Après avoir configuré `.env` une première fois (notamment `DB_PATH` si besoin), le script ci-dessous démarre le tunnel, récupère son URL temporaire, puis lance le serveur avec cette URL comme origine. Le lien HTTPS est affiché dans le terminal et est cliquable dans les terminaux compatibles OSC 8 :
+
+```bash
+npm run build
+./scripts/start-public.sh
+```
+
+Le script charge `.env` depuis la racine du dépôt. Il faut laisser le terminal ouvert ; `Ctrl+C` arrête le serveur et le tunnel. À chaque lancement, Cloudflare peut fournir une nouvelle URL temporaire.
 
 Dans un premier terminal, lancer le tunnel avant l’application pour obtenir son origine exacte :
 
@@ -127,7 +158,7 @@ Pour mettre à jour : sauvegarder, arrêter le serveur, intégrer les changement
 
 Bcrypt coût 12, pseudonymes 3–30 caractères ASCII, mots de passe 12 caractères minimum et 72 **octets UTF-8** maximum. Sessions de sept jours, jetons aléatoires de 256 bits hashés en base, révocation au logout. Cookies HttpOnly, SameSite Strict et Secure en production. Chaque API vérifie session et autorisation, puis propriété des données ou amitié acceptée. Les écritures exigent `X-Mana-Request: 1` ; toute origine fournie doit correspondre exactement à `APP_ORIGIN`. Aucun CORS permissif n’est activé. Un client non navigateur peut omettre Origin, mais doit toujours fournir une invitation ou une session autorisée.
 
-Connexion, inscription et validation d’invitation partagent une limite de 25 requêtes par IP sur 15 minutes. Elle est en mémoire, se réinitialise au redémarrage et peut affecter plusieurs amis derrière une même IP. Les requêtes métier n’ont pas de quota global ; les imports autorisés restent coûteux. Un attaquant réparti sur plusieurs IP peut toujours provoquer une charge : ce petit serveur n’a pas vocation à résister à un déni de service massif. Le parseur JSON accepte jusqu’à 64 Mo pour conserver les imports existants, puis la limite métier de 10 Mo est contrôlée. Garder la machine et les comptes locaux sûrs.
+Connexion, inscription et validation d’invitation partagent une limite de 25 requêtes par IP sur 15 minutes. Elle est en mémoire, se réinitialise au redémarrage et peut affecter plusieurs amis derrière une même IP. Les requêtes métier n’ont pas de quota global ; les imports autorisés restent coûteux. Un attaquant réparti sur plusieurs IP peut toujours provoquer une charge : ce petit serveur n’a pas vocation à résister à un déni de service massif. Le parseur JSON accepte jusqu’à 64 Mo, limite maximale des requêtes, y compris les imports. Garder la machine et les comptes locaux sûrs.
 
 Le démarrage de production refuse une origine absente, HTTP, avec chemin, un proxy non explicitement configuré ou une écoute hors boucle locale. Le mode développement (`npm run dev`, puis invitation via admin) est pour les essais locaux uniquement et utilise des cookies sans Secure. Ne jamais publier le serveur de développement.
 
@@ -158,7 +189,7 @@ Chaque requête exige une session autorisée et une amitié acceptée. Le deck d
 
 ## Importer et exporter ses decks
 
-Dans **Decks**, coller une liste ou choisir un fichier texte UTF-8 ou CSV ManaBox. La limite est **10 Mo = 10 485 760 octets**, contrôlée dans le navigateur et sur le serveur, y compris pour du texte collé. Les cartes sont validées par Scryfall et mises en cache localement.
+Dans **Decks**, coller une liste ou choisir un fichier texte UTF-8 ou CSV ManaBox. La limite métier de 10 Mo a été retirée ; le serveur accepte les requêtes JSON jusqu’à 64 Mo. Les cartes sont validées par Scryfall et mises en cache localement.
 
 Formats acceptés :
 
@@ -198,7 +229,7 @@ L’affichage français ne réécrit pas les exports : les lignes, noms, éditio
 
 ## Gros imports et progression
 
-Les imports prennent en charge **30 000 lignes**, dans la limite de fichier de 10 Mo. Les noms sont dédupliqués, le cache SQLite est consulté puis Scryfall est interrogé par lots de 75 noms. Les écritures sont préparées une fois et exécutées dans une seule transaction : pas de recalcul SQL du total à chaque ligne.
+Les imports prennent en charge **30 000 lignes** et peuvent aller jusqu’à la limite JSON de 64 Mo. Les noms sont dédupliqués, le cache SQLite est consulté puis Scryfall est interrogé par lots de 75 noms. Les écritures sont préparées une fois et exécutées dans une seule transaction : pas de recalcul SQL du total à chaque ligne.
 
 L’interface reçoit la progression en streaming : lecture, validation des noms, puis enregistrement. Une liste avec de nombreux noms jamais vus dépend encore du réseau et des limites Scryfall ; les doublons et les noms en cache ne déclenchent pas de requêtes supplémentaires. Les lignes du deck restent séparées pour l’export. L’affichage charge seulement 100 lignes par page, à l’ouverture du deck, et le rafraîchissement utilise des résumés légers.
 

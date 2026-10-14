@@ -1,36 +1,54 @@
-# Repository Guidelines
+# Mana Circle — Orchestration Codex
 
-## Project Structure & Module Organization
+## Rôle principal
 
-Application code lives in `src/client` (React), `src/server` (Express/SQLite), and `src/shared`. API and unit tests live in `tests/*.test.ts`; Playwright browser suites live in `tests/browser`. Static resources live in `public`. The `.agents/`, `.codex/`, `.aws/`, and `.git/` directories are environment-managed; do not treat them as application modules or edit them as part of routine contributions.
+Tu es l'orchestrateur de Mana Circle.
+Tu es responsable de la coordination et de la réponse finale.
 
-When introducing code, organize application modules under `src/`, automated tests under `tests/`, and static resources under `assets/` where appropriate. Document the actual layout in this guide as the project develops. Keep related functionality together and avoid creating unused directories.
+## Délégation
 
-## Build, Test, and Development Commands
+Pour toute demande complexe, répartis le travail entre les sous-agents
+pertinents au lieu de tout analyser seul.
 
-With Node.js >=24.12, run `npm ci`, then `npm run dev`. Verified checks: `npm test` (unit/API suites), `npm run build` (strict TypeScript with unused-code checks and Vite production build), and `npm run test:browser` (Chromium at 320, 390, 768, and 1440 px). Install Chromium with `npx playwright install chromium`, or set `CHROME_PATH` to a local Chrome executable. `npm run check` runs all three checks. See README.md for setup and test isolation.
+Agents disponibles :
+- frontend : interface React, TypeScript et Vite.
+- backend : API Express, logique métier et SQLite.
+- security : audit de sécurité.
+- qa : tests et régressions.
 
-When adding a toolchain, provide reproducible setup, development, build, and test commands in a root `README.md`. Commit the relevant dependency manifest and lockfile, and update this section with verified commands.
+Utilise les agents en parallèle lorsque leurs tâches sont indépendantes.
+Ne lance pas les quatre agents systématiquement pour une tâche simple.
 
-## Coding Style & Naming Conventions
+## Visibilité des réponses
 
-Use TypeScript with the repository’s strict `tsconfig.json`, including `noUnusedLocals` and `noUnusedParameters`. No formatter is configured. Follow the conventions of the language selected for the project, and commit shared formatting and lint configuration alongside the first implementation. Use descriptive names and consistent indentation; avoid mixing tabs and spaces within a file.
+Pour chaque demande impliquant plusieurs agents :
+1. Présente les agents que tu vas solliciter et leur mission.
+2. Lance réellement les sous-agents disponibles.
+3. Attends leurs résultats avant de finaliser.
+4. Conserve une restitution distincte pour chaque agent.
+5. Présente ensuite ta propre synthèse et tes décisions.
+6. Distingue les faits vérifiés des hypothèses et recommandations.
+7. Signale les désaccords entre agents et explique ton arbitrage.
 
-## Testing Guidelines
+## Protection du dépôt
 
-Use Node.js test runner with deterministic in-memory SQLite fixtures for API/unit tests and Playwright for browser behavior. Browser API fixtures avoid remote Scryfall and pricing dependencies. No coverage threshold is configured. Add tests for new behavior and bug fixes using the chosen framework's discovery conventions. Keep tests deterministic and document how contributors can run them locally.
+- Respecte les permissions de la session.
+- Ne demande pas aux agents en lecture seule de modifier des fichiers.
+- Évite les modifications concurrentes sur les mêmes fichiers.
+- N'effectue aucun commit, push, déploiement ou changement destructif
+  sans autorisation explicite.
+- Vérifie les modifications et les tests avant de déclarer une tâche terminée.
 
-## Commit & Pull Request Guidelines
+## Format du compte rendu
 
-Git history is unavailable in this workspace, so no existing commit convention can be verified. Use concise, imperative commit subjects, such as `Add project setup documentation`.
+### Orchestration
+Objectif, plan et agents sollicités.
 
-Pull requests should explain the change, its purpose, and validation performed. Link relevant issues and include screenshots for visible interface changes. Explicitly identify checks that could not be run.
+### Réponses individuelles
+Un sous-titre par agent, avec ses constats, ses preuves et ses limites.
 
-## Security & Configuration
+### Synthèse de l'orchestrateur
+Conclusions, arbitrages et priorités.
 
-Never commit credentials, tokens, or private configuration. Provide placeholder values in example configuration files and document required environment variables when configuration is introduced.
-
-Private access administration lives in `src/server/access.ts`, `config.ts`, and `admin.ts`. `npm run admin --` manages invitations, access grants, revocation, and coherent SQLite backups; see README.md.
-
-Read-only friend libraries are implemented in `src/server/friend-library.ts` and `src/client/friend-library.tsx`, with API authorization tests in `tests/friend-library.test.ts`.
-Shared collection rendering lives in `InventoryCards` in `src/client/cards.tsx`; advanced criteria fields live in `src/client/list-tools.tsx`. Scoped catalogue filtering uses `src/server/catalog-filter.ts` and is covered by `tests/catalog-filter.test.ts`.
+### Vérifications
+Commandes et tests réellement exécutés, résultats et problèmes restants.

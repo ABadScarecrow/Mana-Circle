@@ -147,3 +147,14 @@ Ce document reprend les demandes de cette conversation et les fonctionnalités e
 - Formulaire et construction de critères Scryfall communs à toutes les listes de cartes ; placeholders courts adaptés aux types réellement acceptés. Filtrage des listes paginées avant pagination, contrôle d’amitié maintenu.
 - Les critères d’impression du catalogue portent sur une version disponible de la carte Oracle ; les critères locaux d’édition possédée restent distincts.
 - Lien Cardmarket sous les noms de la carte, avant l’image, en texte discret de 12 px et cible de 36 px minimum, avec destination de la version sélectionnée inchangée.
+
+
+## Deckbuilder Commander, catalogue local et impressions (14 octobre 2026)
+
+- Deckbuilder Commander avec vues cartes/liste, densité réglable, courbe de mana, avertissements de légalité, filtrage et tri des cartes du deck, et recommandations ajoutées uniquement sur action explicite.
+- Suggestions combinant les combos presque complètes de Commander Spellbook et un score de synergie local fondé sur les textes Oracle Scryfall. Les cartes hors identité couleur, déjà présentes ou sans lien détecté sont exclues ; les scores restent des heuristiques, pas des probabilités.
+- Import du dump Scryfall « All Cards » compressé en flux par lots, index des noms localisés, détails d’impression servis depuis le snapshot et requêtes réseau limitées aux impressions manquantes. Recherche locale exacte, par préfixe et approximative sur les noms indexés.
+- Priorité aux impressions françaises et anglaises, avec repli sur les autres langues quand aucune version FR/EN n’est disponible. Filtres de types de carte comprenant les formes françaises et anglaises.
+- Prix bas moyen des impressions éligibles FR/EN affiché séparément du prix exact de l’édition et du score de synergie ; prix absents conservés comme inconnus.
+- Collections privées par groupes, avec imports ciblés, comptages et contrôle d’isolation par compte.
+- Tests ciblés des modèles et filtres du deckbuilder, de la synergie et des combos, du catalogue et de l’import bulk, des langues, de la recherche locale et des prix moyens ; documentation détaillée dans `docs/DECKBUILDER.md` et instructions d’import dans le README.

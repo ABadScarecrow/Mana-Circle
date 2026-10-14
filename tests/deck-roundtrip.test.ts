@@ -51,16 +51,15 @@ test('authenticated import persists separate printings, exports and reimports wi
   assert.equal(partial.body.retryText,'sideboard\n0 Sol Ring (CMM) 396 *F');
  }finally{db.close();rmSync(directory,{recursive:true,force:true});}
 });
-test('10 MiB import boundary is checked in bytes, including UTF-8 and JSON escaping',async()=>{
+test('imports above 10 MiB are accepted within the 64 MiB JSON request cap',async()=>{
  const db=openDatabase(':memory:');const agent=request.agent(createApp(db,async()=>{throw Error('No lookup needed');}));
  try{
   await agent.post('/api/auth/register').set('X-Mana-Request','1').send({invitation:createInvitation(db,'test').token,username:'sizecheck',password:'correct horse battery'}).expect(200);
   const send=(text:string)=>agent.post('/api/decks/import').set('X-Mana-Request','1').send({name:'Large',text});
-  const atLimit='#'+'a'.repeat(10*1024*1024-1);
-  await send(atLimit).expect(422); // Accepted size; comment-only list contains no cards.
-  await send(atLimit+'a').expect(413);
-  await send('#'+'é'.repeat(10*1024*512)).expect(413);
-  await send('#'+'\t'.repeat(10*1024*1024-1)).expect(422); // JSON body is twice as large as decoded content.
+  const aboveFormerLimit='#'+'a'.repeat(10*1024*1024);
+  await send(aboveFormerLimit).expect(422); // It reaches validation; this comment-only list contains no cards.
+  await send('#'+'é'.repeat(10*1024*512)).expect(422); // UTF-8 text above 10 MiB is also accepted.
+  await send('#'+'\t'.repeat(10*1024*1024)).expect(422); // JSON escaping expands this request to over 20 MiB.
  }finally{db.close();}
 });
 test('legacy SQLite decks migrate without losing cards and remain exportable',()=>{

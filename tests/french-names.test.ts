@@ -3,7 +3,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import {openDatabase} from '../src/server/db';
-import {searchCards,resolver,localizer} from '../src/server/scryfall';
+import {searchCards,resolver,localizer,save} from '../src/server/scryfall';
 import {createApp} from '../src/server/app';
 import {displayName,normalizeName} from '../src/shared/card-name';
 const id='4457ed35-7c10-48c8-9776-456485fdf070';
@@ -34,6 +34,20 @@ test('localizes existing cards once, shares background requests and preserves En
   assert.equal((await translate([{...card}]))[0].fr_name,'Foudre');assert.equal(calls,1);
   assert.equal(displayName({name:'Sol Ring',fr_name:null}),'Sol Ring');assert.equal(displayName({name:'Lightning Bolt',fr_name:'Foudre'}),'Foudre');
   assert.equal(normalizeName('  ÉCLAIR  '),'eclair');
+ }finally{globalThis.fetch=original;db.close();}
+});
+test('French printing type lines are returned for display without replacing canonical English types',async()=>{
+ const db=openDatabase(':memory:'),original=globalThis.fetch;
+ globalThis.fetch=async()=>new Response(JSON.stringify({data:[{...translated,type_line:'Éphémère'}]}));
+ try{
+  const card=save(db,{...translated,type_line:'Éphémère'});
+  assert.equal(card.type_line,'Éphémère');assert.equal(card.fr_type_line,'Éphémère');
+  assert.equal((await localizer(db)([{...card}]))[0].fr_type_line,'Éphémère');
+  const english={oracle_id:'11111111-1111-4111-8111-111111111111',name:'Counterspell',image:null,type_line:'Instant'};
+  db.prepare('INSERT INTO cards VALUES (?,?,?,?)').run(english.oracle_id,english.name,null,english.type_line);
+  const result=await localizer(db)([{...english}]);
+  assert.equal(result[0].type_line,'Instant');assert.equal(result[0].fr_type_line,null);
+  assert.equal(db.prepare('SELECT type_line FROM cards WHERE oracle_id=?').get(english.oracle_id)?.type_line,'Instant');
  }finally{globalThis.fetch=original;db.close();}
 });
 test('French names are exposed in collection, wishlist, decks and friend matches without rewriting exports',async()=>{
