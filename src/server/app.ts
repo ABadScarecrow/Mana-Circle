@@ -23,6 +23,7 @@ import { getMatches } from './matches';
 import {commanderSpellbookClient} from './commander-suggestions';
 import {rankSynergyCandidates,type SynergyCardData} from './deckbuilder-synergy';
 import {buildCommanderDeck,type AutoBuildCard} from './deckbuilder-auto';
+import {gameRoutes} from './games';
 
 const commanderSuggestions=commanderSpellbookClient();
 
@@ -90,6 +91,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   if(!session){res.status(401).json({error:'Connectez-vous pour continuer.'});return;}
   res.locals.user=session;next();
  });
+ gameRoutes(app,db);
  const search=searchCards(db);
  app.get('/api/cards/search',async(req,res)=>{const q=z.string().trim().max(200).parse(req.query.q??'');try{res.json(await search(q));}catch(error){if(error instanceof ScryfallError){scryfallFailure(error,res);return;}res.status(503).json({error:'Recherche indisponible. Réessayez.'});}});
  app.get('/api/cards/:id/details',async(req,res)=>{
@@ -139,6 +141,7 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   const stored=db.prepare('SELECT password FROM users WHERE id=?').get(userId);
   if(!stored||!await compare(input.password,String(stored.password))){res.status(403).json({error:'Mot de passe incorrect. Aucune donnée effacée.'});return;}
   transaction(db,()=>{
+   db.prepare('DELETE FROM game_rooms WHERE id IN (SELECT room_id FROM game_players WHERE user_id=?)').run(userId);
    db.prepare('DELETE FROM decks WHERE user_id=?').run(userId);
    db.prepare('DELETE FROM collection WHERE user_id=?').run(userId);db.prepare('DELETE FROM wishlist WHERE user_id=?').run(userId);
    db.prepare('DELETE FROM friendships WHERE requester=? OR recipient=?').run(userId,userId);
