@@ -13,6 +13,7 @@ async function fixture(page:Page,authenticated=true){
    if(!authenticated){await route.fulfill({status:401,json:{error:'Connexion requise'}});return;}
    body={id:'alice',username:'Alice'};
   }else if(path==='/api/collection')body=[{...counter,fr_name:undefined,fr_type_line:null},{...long,fr_type_line:null}];
+  else if(path==='/api/collection/groups')body=[];
   else if(path==='/api/wishlist')body=wishlist;
   else if(path==='/api/friends')body=[{id:'friend',username:'UnPseudonymeTrèsLong'.repeat(5),requester:'alice',status:'pending'}];
   else if(path==='/api/settings')body={collection_target:null};

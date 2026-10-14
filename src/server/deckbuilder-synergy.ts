@@ -1,5 +1,5 @@
 export type SynergyCardData={oracle_id:string;name:string;type_line:string;image:string|null;oracle_text:string;toughness?:number|string|null};
-export type SynergyLink={oracle_id:string;name:string;score:number;reasons:string[]};
+export type SynergyLink={oracle_id:string;name:string;score:number;reasons:string[];kind:'direct'|'conditional'};
 export type SynergySuggestion=SynergyCardData&{synergy_score:number;synergy_links:SynergyLink[];synergy_source:'Scryfall Oracle heuristic'};
 
 type Mechanic={key:string;label:string;engine:RegExp[];payoff:RegExp[];weight:number};
@@ -66,6 +66,25 @@ function reanimationTargetReasons(left:SynergyCardData,right:SynergyCardData):Pa
  const source=reanimates(left)?left:(reanimates(right)?right:null),target=source===left?right:left;
  return source&&/\bcreature\b/i.test(target.type_line)?[{label:'créature réanimable depuis le cimetière',weight:0.72,evidence:1}]:[];
 }
+function donationReasons(left:SynergyCardData,right:SynergyCardData):PairReason[]{
+ const text=(card:SynergyCardData)=>normalizeOracleText(card.oracle_text);
+ const grantsControl=(card:SynergyCardData)=>/\b(?:target opponent|an opponent|target player) gains control of (?:target )?(?:permanent|creature|artifact|enchantment|planeswalker|land) you control\b/.test(text(card))||/\b(?:you may )?(?:give|have .*? gain) (?:target opponent|an opponent|target player) control of (?:target )?(?:permanent|creature|artifact|enchantment|planeswalker|land) you control\b/.test(text(card));
+ const zedruuPayoff=(card:SynergyCardData)=>/permanents? you own that (?:your )?opponents? control/.test(text(card));
+ const permanent=(card:SynergyCardData)=>/\b(?:creature|artifact|enchantment|planeswalker|land)\b/i.test(card.type_line);
+ const controllerEffect=(card:SynergyCardData)=>{
+  const oracle=text(card);
+  const penalty=/\byou (?:can't|cannot|lose (?:\d+ )?life|lose the game|sacrifice|discard|get (?:a |\d+ )?poison counter|pay (?:\{[^}]+\}|\d+|life)|have to sacrifice)\b|\bdeals? \d+ damage to you\b|\bat the beginning of your upkeep\b[^.]*\b(?:lose|sacrifice|discard|pay|damage|life)\b/i.test(oracle);
+  const benefit=/\byou (?:draw|gain \d+ life|have no maximum hand size|may play .*? from your graveyard|get an? [a-z-]+ counter)\b|\bat the beginning of your upkeep\b[^.]*\b(?:draw|gain|create|add)\b|\bwhenever .*? you control\b/i.test(oracle);
+  return permanent(card)&&(penalty||benefit);
+ };
+ const transferEngine=grantsControl(left)?left:grantsControl(right)?right:null;
+ const relevantPermanent=transferEngine===left?right:left;
+ if(transferEngine&&controllerEffect(relevantPermanent))return [{label:'don conditionnel d’un permanent',weight:0.68,evidence:1,kind:'conditional'}];
+ const payoff=zedruuPayoff(left)?left:zedruuPayoff(right)?right:null;
+ const donateTarget=payoff===left?right:left;
+ if(payoff&&controllerEffect(donateTarget))return [{label:'don conditionnel d’un permanent',weight:0.68,evidence:1,kind:'conditional'}];
+ return [];
+}
 function escapeRegExp(value:string):string{return value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
 function normalizeOracleText(text:string):string{return text.normalize('NFKC').replace(/[’‘]/g,"'").replace(/[“”]/g,'"').replace(/[—–]/g,'-').replace(/\u00a0/g,' ').toLowerCase();}
 function roles(text:string,typeLine:string):Map<string,Role>{
@@ -86,7 +105,7 @@ function roles(text:string,typeLine:string):Map<string,Role>{
  if(/\blifelink\b/i.test(all)){const prior=result.get('lifegain');result.set('lifegain',{engine:true,payoff:prior?.payoff??false,evidence:(prior?.evidence??0)+1,typeEvidence:prior?.typeEvidence??0});}
  return result;
 }
-type PairReason={label:string;weight:number;evidence:number};
+type PairReason={label:string;weight:number;evidence:number;kind?:'conditional'};
 function pairReasons(left:Map<string,Role>,right:Map<string,Role>,leftCard:SynergyCardData,rightCard:SynergyCardData):PairReason[]{
  const result:{label:string;weight:number;evidence:number}[]=[];
  for(const mechanic of mechanics){const a=left.get(mechanic.key),b=right.get(mechanic.key);
@@ -109,6 +128,7 @@ function pairReasons(left:Map<string,Role>,right:Map<string,Role>,leftCard:Syner
  result.push(...sacrificeFuelReasons(leftCard,rightCard));
  result.push(...phenaxToughnessReasons(leftCard,rightCard));
  result.push(...reanimationTargetReasons(leftCard,rightCard));
+ result.push(...donationReasons(leftCard,rightCard));
  return result;
 }
 function scorePair(reasons:PairReason[]):number{
@@ -124,7 +144,7 @@ export function rankSynergyCandidates(deck:SynergyCardData[],pool:SynergyCardDat
  const deckIds=new Set(deck.map(card=>card.oracle_id)),profiles=new Map(deck.map(card=>[card.oracle_id,roles(card.oracle_text,card.type_line)]));
  const ranked:SynergySuggestion[]=[];
  for(const candidate of pool){if(deckIds.has(candidate.oracle_id))continue;const candidateRoles=roles(candidate.oracle_text,candidate.type_line),links:SynergyLink[]=[];
-  for(const card of deck){const reasons=pairReasons(candidateRoles,profiles.get(card.oracle_id)!,candidate,card);if(!reasons.length)continue;links.push({oracle_id:card.oracle_id,name:card.name,score:scorePair(reasons),reasons:reasons.map(reason=>reason.label)});}
+  for(const card of deck){const reasons=pairReasons(candidateRoles,profiles.get(card.oracle_id)!,candidate,card);if(!reasons.length)continue;links.push({oracle_id:card.oracle_id,name:card.name,score:scorePair(reasons),reasons:reasons.map(reason=>reason.label),kind:reasons.some(reason=>reason.kind==='conditional')?'conditional':'direct'});}
   if(!links.length)continue;links.sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name,'en'));
   const strongSupport=links.slice(1).filter(link=>link.score>=55).length,anchorBonus=commanderId?Math.min(12,Math.round((links.find(link=>link.oracle_id===commanderId)?.score??0)*0.12)):0,total=Math.min(98,topScore(links)+Math.min(12,strongSupport*4)+anchorBonus);
   if(total<15)continue;

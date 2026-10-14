@@ -35,21 +35,22 @@ function curveBonus(card:AutoBuildCard,counts:Map<number,number>,planned:number)
  return Math.max(-12,Math.min(8,(desired-fraction)*0.65))-(cmc>=7?5:0)-(cmc>=6&&planned>45?3:0);
 }
 function countRole(cards:AutoBuildCard[],role:Role){return cards.reduce((count,card)=>count+(roles(card).has(role)?1:0),0);}
-function scoreCandidate(card:AutoBuildCard,dynamic:number,base:number,roleCounts:Record<Role,number>,curve:Map<number,number>,planned:number,budgetMax?:number,budgetSpent=0,prioritizeOwned=false):number{
+function scoreCandidate(card:AutoBuildCard,dynamic:number,base:number,roleCounts:Record<Role,number>,curve:Map<number,number>,planned:number,budgetMax?:number,budgetSpent=0,prioritizeOwned=false,budgetMin=0):number{
  const roleScore=[...roles(card)].reduce((sum,role)=>sum+(roleCounts[role]<roleTargets[role]?roleWeights[role]*(1-roleCounts[role]/roleTargets[role]):0),0);
  const synergy=dynamic>0?dynamic*0.72+base*0.28:base*0.4;
  const curveScore=curveBonus(card,curve,planned);
  let priceScore=0;
- if(budgetMax!==undefined){const price=card.low_average_price,slots=Math.max(1,100-planned),budgetPerSlot=Math.max(0,(budgetMax-budgetSpent)/slots);priceScore=price==null?-10000:Math.max(-12,Math.min(8,(budgetPerSlot-price)/Math.max(0.05,budgetPerSlot)*8));}
+ if(budgetMax!==undefined||budgetMin>0){const price=card.low_average_price,slots=Math.max(1,100-planned),target=(budgetSpent<budgetMin?(budgetMin-budgetSpent)/slots:budgetMax===undefined?0:(budgetMax-budgetSpent)/slots);priceScore=price==null?-10000:target>0?Math.max(-12,Math.min(8,(price-target)/Math.max(0.05,target)*8)):0;}
  const ownedBonus=prioritizeOwned&&(card.owned_quantity??0)>0?6:0;
  return synergy+roleScore+curveScore+priceScore+ownedBonus;
 }
 
 /** Builds a deterministic 100-card Commander list while preserving every seed card. */
-export function buildCommanderDeck(commanderId:string,seeds:AutoBuildSeed[],catalog:AutoBuildCard[],budgetMax?:number,prioritizeOwned=false):{cards:{card:AutoBuildCard;quantity:number}[];summary:{total:number;lands:number;nonlands:number;roles:Record<Role,number>;synergyCards:number;total_price:number|null}}{
+export function buildCommanderDeck(commanderId:string,seeds:AutoBuildSeed[],catalog:AutoBuildCard[],budgetMax?:number,prioritizeOwned=false,budgetMin=0):{cards:{card:AutoBuildCard;quantity:number}[];summary:{total:number;lands:number;nonlands:number;roles:Record<Role,number>;synergyCards:number;total_price:number|null}}{
+ if(budgetMax!==undefined&&budgetMin>budgetMax)throw new Error('Le budget minimum ne peut pas dépasser le budget maximum.');
  const byId=new Map(catalog.map(card=>[card.oracle_id,card]));
  const commander=byId.get(commanderId);if(!commander)throw new Error('Le commandant est absent du catalogue local.');
- if(commander.commander_legality!=='legal'||(!/\bLegendary\b.*\bCreature\b/i.test(commander.type_line)&&!/can be your commander/i.test(commander.oracle_text)))throw new Error('Cette carte ne peut pas être commandant en Commander.');
+ if(commander.commander_legality!=='legal'||!/\bLegendary\b.*\bCreature\b/i.test(commander.type_line))throw new Error('Le commandant doit être une créature légendaire légale en Commander.');
  const identity=cardColors(commander),seedCounts=new Map<string,number>();
  for(const seed of seeds){seedCounts.set(seed.oracle_id,(seedCounts.get(seed.oracle_id)??0)+seed.quantity);}
  if([...seedCounts.values()].reduce((sum,quantity)=>sum+quantity,0)>100)throw new Error('La liste contient déjà plus de 100 cartes.');
@@ -62,13 +63,13 @@ export function buildCommanderDeck(commanderId:string,seeds:AutoBuildSeed[],cata
   if(cardColors(card).size&&[...cardColors(card)].some(color=>!identity.has(color)))throw new Error(`La carte ${card.name} dépasse l’identité couleur du commandant.`);
   if(id===commanderId&&quantity!==1)throw new Error('Le commandant doit être présent en un seul exemplaire.');
   if(quantity>1&&!isBasic(card)&&!/a deck can have any number of cards named/i.test(card.oracle_text))throw new Error(`La carte ${card.name} ne peut pas être choisie plusieurs fois en Commander.`);
-  if(budgetMax!==undefined){if(card.low_average_price==null)throw new Error(`Aucun prix bas moyen n’est disponible pour ${card.name} ; impossible de garantir le budget.`);budgetSpent+=card.low_average_price*quantity;}
+  if(budgetMax!==undefined||budgetMin>0){if(card.low_average_price==null)throw new Error(`Aucun prix bas moyen n’est disponible pour ${card.name} ; impossible de garantir le budget.`);budgetSpent+=card.low_average_price*quantity;}
   for(let index=0;index<quantity;index++)selected.push(card);
  }
  if(budgetMax!==undefined&&budgetSpent>budgetMax)throw new Error(`Les cartes déjà choisies dépassent le budget (${budgetSpent.toFixed(2)} € pour ${budgetMax.toFixed(2)} €).`);
  if(selected.length>100)throw new Error('La liste contient déjà plus de 100 cartes.');
  const selectedIds=new Set(seedCounts.keys()),selectedUnique=[...new Map(selected.map(card=>[card.oracle_id,card])).values()];
- const pool=catalog.filter(card=>!selectedIds.has(card.oracle_id)&&card.commander_legality==='legal'&&[...cardColors(card)].every(color=>identity.has(color))&&(budgetMax===undefined||card.low_average_price!=null));
+ const pool=catalog.filter(card=>!selectedIds.has(card.oracle_id)&&card.commander_legality==='legal'&&[...cardColors(card)].every(color=>identity.has(color))&&((budgetMax===undefined&&budgetMin===0)||card.low_average_price!=null));
  const landPool=pool.filter(isLand),nonlandPool=pool.filter(card=>!isLand(card));
  const currentLands=selected.filter(isLand).length,currentNonlands=selected.length-currentLands;
  const targetNonlands=Math.max(currentNonlands,Math.min(64,100-currentLands)),targetLands=100-targetNonlands;
@@ -89,10 +90,10 @@ export function buildCommanderDeck(commanderId:string,seeds:AutoBuildSeed[],cata
  while(selected.filter(card=>!isLand(card)).length<targetNonlands){
   const remaining=working.filter(card=>!selectedIds.has(card.oracle_id));if(!remaining.length)break;
   const dynamicRank=rankSynergyCandidates(selectedUnique,remaining,remaining.length,commanderId),dynamicScore=new Map(dynamicRank.map(card=>[card.oracle_id,card.synergy_score]));
-  const next=remaining.filter(card=>budgetMax===undefined||budgetSpent+(card.low_average_price??Infinity)<=budgetMax).map(card=>({card,score:scoreCandidate(card,dynamicScore.get(card.oracle_id)??0,initialScore.get(card.oracle_id)??0,roleCounts,curve,selected.length,budgetMax,budgetSpent,prioritizeOwned)})).sort((a,b)=>b.score-a.score||a.card.oracle_id.localeCompare(b.card.oracle_id))[0]?.card;
+  const next=remaining.filter(card=>(budgetMax===undefined||budgetSpent+(card.low_average_price??Infinity)<=budgetMax)&&((budgetMax===undefined&&budgetMin===0)||card.low_average_price!=null)).map(card=>({card,score:scoreCandidate(card,dynamicScore.get(card.oracle_id)??0,initialScore.get(card.oracle_id)??0,roleCounts,curve,selected.length,budgetMax,budgetSpent,prioritizeOwned,budgetMin)})).sort((a,b)=>b.score-a.score||a.card.oracle_id.localeCompare(b.card.oracle_id))[0]?.card;
   if(!next)break;
   selected.push(next);selectedIds.add(next.oracle_id);selectedUnique.push(next);
-  if(budgetMax!==undefined)budgetSpent+=next.low_average_price!;
+  if(budgetMax!==undefined||budgetMin>0)budgetSpent+=next.low_average_price!;
   for(const role of roles(next))roleCounts[role]++;
   const cmc=Math.min(7,Math.max(0,Math.floor(manaValue(next))));curve.set(cmc,(curve.get(cmc)??0)+1);
  }
@@ -102,14 +103,14 @@ export function buildCommanderDeck(commanderId:string,seeds:AutoBuildSeed[],cata
  const nonbasic=landPool.filter(card=>!isBasic(card));
  const nonbasicLimit=Math.min(12,landSlots);
  for(let count=0;count<nonbasicLimit;count++){
-  const remaining=nonbasic.filter(card=>!selectedIds.has(card.oracle_id)&&(budgetMax===undefined||budgetSpent+(card.low_average_price??Infinity)<=budgetMax));if(!remaining.length)break;
+  const remaining=nonbasic.filter(card=>!selectedIds.has(card.oracle_id)&&(budgetMax===undefined||budgetSpent+(card.low_average_price??Infinity)<=budgetMax)&&((budgetMax===undefined&&budgetMin===0)||card.low_average_price!=null));if(!remaining.length)break;
   const ranked=rankSynergyCandidates(selectedUnique,remaining,remaining.length,commanderId),synergies=new Map(ranked.map(card=>[card.oracle_id,card.synergy_score]));
   const next=[...remaining].sort((a,b)=>{
    const fixing=(card:AutoBuildCard)=>[...cardColors(card)].filter(color=>identity.has(color)).length*2+(/any color|one mana of any color|add one mana of any type/i.test(card.oracle_text)?4:0)-(/enters the battlefield tapped|enters tapped/i.test(card.oracle_text)?3:0);
    const ownedBonus=(card:AutoBuildCard)=>prioritizeOwned&&(card.owned_quantity??0)>0?6:0;
    return ((synergies.get(b.oracle_id)??0)+fixing(b)+ownedBonus(b))-((synergies.get(a.oracle_id)??0)+fixing(a)+ownedBonus(a))||a.oracle_id.localeCompare(b.oracle_id);
   })[0];
-  selected.push(next);selectedIds.add(next.oracle_id);selectedUnique.push(next);if(budgetMax!==undefined)budgetSpent+=next.low_average_price!;landSlots--;
+  selected.push(next);selectedIds.add(next.oracle_id);selectedUnique.push(next);if(budgetMax!==undefined||budgetMin>0)budgetSpent+=next.low_average_price!;landSlots--;
  }
  const weights=Object.fromEntries([...identity].map(color=>[color,0])) as Record<string,number>;
  for(const card of selectedUnique)for(const [color,count] of Object.entries(manaPips(card)))if(color in weights)weights[color]+=count;
@@ -119,15 +120,20 @@ export function buildCommanderDeck(commanderId:string,seeds:AutoBuildSeed[],cata
   const totalWeight=colors.reduce((sum,color)=>sum+(weights[color]??0),0)||colors.length||1;
   const color=colors.sort((a,b)=>((weights[b]??0)/totalWeight)-((weights[a]??0)/totalWeight)||a.localeCompare(b))[0]??'C';
   const basicName=basicNames[color],subtype=basicName==='Wastes'?'Wastes':basicName;
-  const basic=landPool.filter(card=>isBasic(card)&&(card.name===basicName||new RegExp(`\\b${subtype}\\b`,'i').test(card.type_line))).sort((a,b)=>(prioritizeOwned?Number((b.owned_quantity??0)>0)-Number((a.owned_quantity??0)>0):0)||(a.low_average_price??Infinity)-(b.low_average_price??Infinity)||a.oracle_id.localeCompare(b.oracle_id))[0];
+  const matchingBasics=landPool.filter(card=>isBasic(card)&&(card.name===basicName||new RegExp(`\\b${subtype}\\b`,'i').test(card.type_line)));
+  // Snow-Covered basics are unnecessary for ordinary mana fixing; prefer a
+  // regular basic when present, then choose by price before owned-card bias.
+  const ordinaryBasics=matchingBasics.filter(card=>!/snow-covered/i.test(`${card.name} ${card.type_line}`));
+  const basic=[...(ordinaryBasics.length?ordinaryBasics:matchingBasics)].sort((a,b)=>(a.low_average_price??Infinity)-(b.low_average_price??Infinity)||(prioritizeOwned?Number((b.owned_quantity??0)>0)-Number((a.owned_quantity??0)>0):0)||a.oracle_id.localeCompare(b.oracle_id))[0];
   if(!basic)throw new Error(`Le catalogue local ne contient pas le terrain de base ${basicNames[color]??'incolore'}.`);
-  if(budgetMax!==undefined&&(basic.low_average_price==null||budgetSpent+basic.low_average_price>budgetMax))throw new Error('Le budget restant ne permet pas d’ajouter tous les terrains de base nécessaires.');
-  selected.push(basic);if(!selectedIds.has(basic.oracle_id))selectedUnique.push(basic);selectedIds.add(basic.oracle_id);if(budgetMax!==undefined)budgetSpent+=basic.low_average_price!;weights[color]=Math.max(1,(weights[color]??1)-totalWeight/landSlots);landSlots--;
+  if((budgetMax!==undefined||budgetMin>0)&&(basic.low_average_price==null||budgetMax!==undefined&&budgetSpent+basic.low_average_price>budgetMax))throw new Error('Le budget restant ne permet pas d’ajouter tous les terrains de base nécessaires.');
+  selected.push(basic);if(!selectedIds.has(basic.oracle_id))selectedUnique.push(basic);selectedIds.add(basic.oracle_id);if(budgetMax!==undefined||budgetMin>0)budgetSpent+=basic.low_average_price!;weights[color]=Math.max(1,(weights[color]??1)-totalWeight/landSlots);landSlots--;
  }
  const counts=new Map<string,number>();for(const card of selected)counts.set(card.oracle_id,(counts.get(card.oracle_id)??0)+1);
  const cards=[...counts].map(([id,quantity])=>({card:byId.get(id)!,quantity}));
  const total=cards.reduce((sum,row)=>sum+row.quantity,0),lands=cards.reduce((sum,row)=>sum+(isLand(row.card)?row.quantity:0),0);
  if(total!==100)throw new Error(`Construction incomplète : ${total} cartes sur 100.`);
  if(budgetMax!==undefined&&budgetSpent>budgetMax)throw new Error('Le budget maximum serait dépassé ; aucune liste n’a été appliquée.');
- return {cards,summary:{total,lands,nonlands:total-lands,roles:roleCounts,synergyCards:cards.filter(({card})=>(initialScore.get(card.oracle_id)??0)>=15).length,total_price:budgetMax===undefined?null:Math.round(budgetSpent*100)/100}};
+ if(budgetMin>0&&budgetSpent<budgetMin)throw new Error(`Le deck atteint ${budgetSpent.toFixed(2)} € ; le budget minimum demandé est ${budgetMin.toFixed(2)} €. Choisis un minimum inférieur ou ajuste le budget maximum.`);
+ return {cards,summary:{total,lands,nonlands:total-lands,roles:roleCounts,synergyCards:cards.filter(({card})=>(initialScore.get(card.oracle_id)??0)>=15).length,total_price:budgetMax===undefined&&budgetMin===0?null:Math.round(budgetSpent*100)/100}};
 }

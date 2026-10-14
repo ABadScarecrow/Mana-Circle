@@ -65,7 +65,7 @@ test('filters combine, invalid ranges show an error and reject results',()=>{
 
 test('active filter count is scoped and clearing restores zero active filters',()=>{
  const value=filters({name:'elf',kind:'combo',synergyMin:'50',ownership:'owned',quantityMin:'1'});
- assert.equal(activeDeckFilterCount(value,'recommendations'),3);
+ assert.equal(activeDeckFilterCount(value,'recommendations'),4);
  assert.equal(activeDeckFilterCount(value,'selected'),3);
  assert.equal(activeDeckFilterCount(emptyDeckFilters,'collection'),0);
 });

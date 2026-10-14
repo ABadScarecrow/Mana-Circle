@@ -74,11 +74,13 @@ export function searchCards(db:DatabaseSync){
   const hit=cache.get(key);if(hit&&hit.expires>Date.now())return hit.cards;
   if(pending.has(key))return pending.get(key)!;
   const job=(async()=>{
-   // Exact canonical or localized names use the existing primary-key index and
-   // should not initialize or scan the fuzzy-search catalog at all.
+   // Keep exact matches in the candidate set, but don't return them alone:
+   // a short exact name (for example, the Jace token) can also be the prefix
+   // of many cards the user expects to see.
    const exact=exactName.all(query.trim().toLowerCase()) as unknown as Card[];
-   if(exact.length){cache.set(key,{expires:Date.now()+300000,cards:exact});return exact;}
-   const local=rankCandidates(query,localCandidates(query)).filter(card=>score(query,card)<=0.5).slice(0,8);
+   const localPool=new Map<string,Card>();
+   for(const card of [...exact,...localCandidates(query)])localPool.set(card.oracle_id,card);
+   const local=rankCandidates(query,[...localPool.values()]).filter(card=>score(query,card)<=0.5).slice(0,8);
    if(local.some(card=>score(query,card)===0)){cache.set(key,{expires:Date.now()+300000,cards:local});return local;}
    if(local.length&&score(query,local[0])<=0.3){const cards=await translate(local);cache.set(key,{expires:Date.now()+300000,cards});return cards;}
    let cards:Card[]=[],failure:unknown;
@@ -166,7 +168,7 @@ export function printingDetails(db?:DatabaseSync){
   const preferred=versions.filter(v=>v.lang==='fr'||v.lang==='en');
   const visible=preferred.length?preferred:versions;
   const first=visible.find(v=>v.lang==='fr')??visible[0];
-  return {oracle_id:oracleId,name:first.name,type_line:first.type_line??'',oracle_text:first.oracle_text??first.card_faces?.map((face:any)=>face.oracle_text??'').join('\n')??'',mana_cost:first.mana_cost??'',warning,stale,checked_at:Date.now(),versions:visible.map(v=>({id:v.id,oracle_id:v.oracle_id,name:v.name,image:v.image_uris?.normal??v.card_faces?.[0]?.image_uris?.normal??null,set_code:v.set??'',set_name:v.set_name??v.set??'',collector_number:v.collector_number??'',released_at:v.released_at??'',language:v.lang??null,rarity:v.rarity,finishes:v.finishes??[],cardmarket_id:v.cardmarket_id??null,url:v.purchase_uris?.cardmarket??null,usd:v.prices?.usd??null,usd_foil:v.prices?.usd_foil??null,usd_etched:v.prices?.usd_etched??null,eur:v.prices?.eur??null,eur_foil:v.prices?.eur_foil??null,prices_checked_at:v.prices_checked_at??Date.now()}))};
+  return {oracle_id:oracleId,name:first.name,type_line:first.type_line??'',oracle_text:first.oracle_text??first.card_faces?.map((face:any)=>face.oracle_text??'').join('\n')??'',mana_cost:first.mana_cost??'',warning,stale,checked_at:Date.now(),versions:visible.map(v=>({id:v.id,oracle_id:v.oracle_id,name:v.name,image:v.image_uris?.normal??v.card_faces?.[0]?.image_uris?.normal??null,card_faces:v.card_faces?.map((face:any)=>({image:face.image_uris?.normal??null,name:face.name??''}))??[],set_code:v.set??'',set_name:v.set_name??v.set??'',collector_number:v.collector_number??'',released_at:v.released_at??'',language:v.lang??null,rarity:v.rarity,finishes:v.finishes??[],cardmarket_id:v.cardmarket_id??null,url:v.purchase_uris?.cardmarket??null,usd:v.prices?.usd??null,usd_foil:v.prices?.usd_foil??null,usd_etched:v.prices?.usd_etched??null,eur:v.prices?.eur??null,eur_foil:v.prices?.eur_foil??null,prices_checked_at:v.prices_checked_at??Date.now()}))};
  };
  return async(oracleId:string)=>{
   const hit=cache.get(oracleId);if(hit&&hit.expires>Date.now())return hit.value;

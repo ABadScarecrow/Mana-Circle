@@ -187,3 +187,35 @@ test('mill and discard enablers connect to graveyard reuse payoffs',()=>{
  const opponentMill=card('opponent-mill','Maddening Cacophony','Sorcery','Each opponent mills eight cards.');
  assert.deepEqual(rankSynergyCandidates([reanimator],[opponentMill]),[]);
 });
+
+test('Zedruu connects to permanents that can be given away for a mechanical reason',()=>{
+ const zedruu=card('zedruu','Zedruu the Greathearted','Legendary Creature — Minotaur Monk','At the beginning of your upkeep, you gain 1 life and draw a card for each permanent you own that your opponents control. {R}{W}{U}: Target opponent gains control of target permanent you control.');
+ const jinxedIdol=card('jinxed-idol','Jinxed Idol','Artifact','At the beginning of your upkeep, Jinxed Idol deals 2 damage to you. Sacrifice a creature: Target opponent gains control of Jinxed Idol.');
+ const steelGolem=card('steel-golem','Steel Golem','Artifact Creature — Golem','You can’t cast creature spells.');
+ const gridMonitor=card('grid-monitor','Grid Monitor','Artifact Creature — Construct','You can’t cast creature spells.');
+ const unrelated=card('zedruu-unrelated','Grizzly Bears','Creature — Bear','');
+ const ranked=rankSynergyCandidates([zedruu],[jinxedIdol,steelGolem,gridMonitor,unrelated]);
+ const names=ranked.map(candidate=>candidate.name);
+ assert.ok(names.includes('Jinxed Idol'));
+ assert.ok(names.includes('Steel Golem'));
+ assert.ok(names.includes('Grid Monitor'));
+ assert.ok(!names.includes('Grizzly Bears'),'a transferable permanent without a relevant benefit or drawback is not a synergy');
+ assert.ok(ranked.find(candidate=>candidate.name==='Jinxed Idol')?.synergy_links[0].reasons.includes('don conditionnel d’un permanent'));
+ const golem=ranked.find(candidate=>candidate.name==='Steel Golem')?.synergy_links[0];assert.ok(golem?.reasons.includes('don conditionnel d’un permanent'));assert.equal(golem?.kind,'conditional');
+});
+
+test('explicit permanent transfer connects a control-sensitive drawback without Zedruu',()=>{
+ const offering=card('offering','Harmless Offering','Sorcery','Target opponent gains control of target permanent you control.');
+ const pact=card('pact','Demonic Pact','Enchantment','At the beginning of your upkeep, choose one that hasn’t been chosen — Draw two cards; target opponent loses 2 life and you gain 2 life; gain control of target creature; you lose the game.');
+ const [result]=rankSynergyCandidates([offering],[pact]);
+ assert.equal(result?.name,'Demonic Pact');
+ assert.equal(result?.synergy_links[0].kind,'conditional');
+ assert.ok(result?.synergy_links[0].reasons.includes('don conditionnel d’un permanent'));
+});
+
+test('a drawback alone does not connect to an unrelated draw engine',()=>{
+ const drawEngine=card('draw-engine-no-donate','Kwain, Itinerant Meddler','Legendary Creature — Rabbit Wizard','{T}: Each player may draw a card, then each player who drew a card this way gains 1 life.');
+ const drawback=card('draw-engine-drawback','Steel Golem','Artifact Creature — Golem','You can’t cast creature spells.');
+ const unrelated=card('draw-engine-unrelated','Opt','Instant','Scry 1. Draw a card.');
+ assert.deepEqual(rankSynergyCandidates([drawEngine],[drawback,unrelated]),[]);
+});
