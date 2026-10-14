@@ -22,6 +22,7 @@ import {ScryfallError} from './scryfall-client';
 import { getMatches } from './matches';
 import {commanderSpellbookClient} from './commander-suggestions';
 import {rankSynergyCandidates,type SynergyCardData} from './deckbuilder-synergy';
+import {buildCommanderDeck,type AutoBuildCard} from './deckbuilder-auto';
 
 const commanderSuggestions=commanderSpellbookClient();
 
@@ -201,6 +202,29 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   transaction(db,()=>{db.prepare('INSERT INTO decks(id,user_id,name) VALUES (?,?,?)').run(id,userId,name);const insert=db.prepare("INSERT INTO deck_cards(deck_id,oracle_id,section,quantity,finish) VALUES (?,?,?,?,'nonfoil')");for(const [oracleId,quantity] of unique)insert.run(id,oracleId,oracleId===commander_id?'commander':'mainboard',quantity);});
   res.status(201).json({id,name});
  });
+ app.post('/api/deckbuilder/auto-build',async(req,res)=>{
+  const input=z.object({commander_id:z.string().uuid(),budget_max:z.number().finite().min(0).max(1000000).optional(),prioritize_owned:z.boolean().optional(),cards:z.array(z.object({oracle_id:z.string().uuid(),quantity:z.number().int().min(1).max(9999)})).min(1).max(500)}).parse(req.body);
+  const seeds=new Map<string,number>();for(const card of input.cards)seeds.set(card.oracle_id,(seeds.get(card.oracle_id)??0)+card.quantity);
+  if(!seeds.has(input.commander_id)){res.status(400).json({error:'Désigne un commandant présent dans les cartes choisies avant de construire le deck.'});return;}
+  const commanderRow=db.prepare(`SELECT p.data FROM card_printings p WHERE p.oracle_id=? AND json_valid(p.data) ORDER BY p.released_at DESC,p.id DESC LIMIT 1`).get(input.commander_id) as {data:string}|undefined;
+  let identity:string[]=[];try{identity=commanderRow?JSON.parse(commanderRow.data).color_identity:[];}catch{/* The pure builder returns a useful error for missing/invalid metadata. */}
+  if(!commanderRow||!Array.isArray(identity)||!identity.every(color=>typeof color==='string')){res.status(422).json({error:'Les informations Scryfall du commandant sont absentes ou invalides.'});return;}
+  const identityClause=identity.length?`NOT EXISTS(SELECT 1 FROM json_each(p.data,'$.color_identity') ci WHERE ci.value NOT IN (${identity.map(()=>'?').join(',')}))`:`json_array_length(p.data,'$.color_identity')=0`;
+  const seedIds=[...seeds.keys()],seedClause=` OR c.oracle_id IN (${seedIds.map(()=>'?').join(',')})`;
+  const raw=db.prepare(`SELECT c.oracle_id,c.name,c.type_line,c.image,json_extract(p.data,'$.toughness') AS toughness,
+   coalesce(json_extract(p.data,'$.oracle_text'),json_extract(p.data,'$.card_faces[0].oracle_text'),'') || char(10) || coalesce(json_extract(p.data,'$.card_faces[1].oracle_text'),'') AS oracle_text,
+   json_extract(p.data,'$.color_identity') AS color_identity,json_extract(p.data,'$.cmc') AS cmc,json_extract(p.data,'$.mana_cost') AS mana_cost,
+   json_extract(p.data,'$.legalities.commander') AS commander_legality
+   FROM cards c JOIN card_printings p ON p.id=(SELECT p2.id FROM card_printings p2 WHERE p2.oracle_id=c.oracle_id AND json_valid(p2.data) ORDER BY p2.released_at DESC,p2.id DESC LIMIT 1)
+   WHERE json_valid(p.data) AND json_extract(p.data,'$.legalities.commander')='legal' AND json_type(p.data,'$.color_identity')='array' AND (${identityClause}${seedClause})`).all(...identity,...seedIds) as {oracle_id:string;name:string;type_line:string;image:string|null;toughness:number|string|null;oracle_text:string;color_identity:string|null;cmc:number|null;mana_cost:string|null;commander_legality:string|null}[];
+  const catalog:AutoBuildCard[]=[],ownedRows=db.prepare('SELECT oracle_id,quantity FROM collection WHERE user_id=?').all(res.locals.user.id) as {oracle_id:string;quantity:number}[],ownedById=new Map(ownedRows.map(row=>[row.oracle_id,row.quantity]));
+  for(const row of raw){try{const colors=row.color_identity?JSON.parse(row.color_identity):[];if(!Array.isArray(colors)||!colors.every(color=>typeof color==='string'))continue;catalog.push({...row,color_identity:colors,owned_quantity:ownedById.get(row.oracle_id)??0});}catch{/* Ignore invalid rows from a damaged local printing. */}}
+  try{
+   if(input.budget_max!==undefined){const averages=await allEditionLowAverages(db,catalog.map(card=>({oracle_id:card.oracle_id,name:card.name,quantity:1})),prices);for(const card of catalog)card.low_average_price=averages.get(averageLowPriceKey(card.oracle_id))??null;}
+   const result=buildCommanderDeck(input.commander_id,[...seeds].map(([oracle_id,quantity])=>({oracle_id,quantity})),catalog,input.budget_max,input.prioritize_owned??false);res.json({cards:result.cards.map(({card,quantity})=>({...card,quantity})),summary:result.summary});
+  }
+  catch(error){res.status(422).json({error:error instanceof Error?error.message:'Le deck n’a pas pu être construit.'});}
+ });
  app.post('/api/deckbuilder/suggestions',async(req,res)=>{
   const input=z.object({commander_id:z.string().uuid(),cards:z.array(z.object({oracle_id:z.string().uuid(),quantity:z.number().int().min(1).max(9999)})).min(1).max(500)}).parse(req.body);
   const counts=new Map<string,number>();for(const card of input.cards)counts.set(card.oracle_id,(counts.get(card.oracle_id)??0)+card.quantity);
@@ -208,13 +232,13 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   const rows=db.prepare(`SELECT oracle_id,name,type_line,image FROM cards WHERE oracle_id IN (${[...counts.keys()].map(()=>'?').join(',')})`).all(...counts.keys()) as {oracle_id:string;name:string;type_line:string;image:string|null}[],byId=new Map(rows.map(row=>[row.oracle_id,row]));
   if(rows.length!==counts.size){res.status(400).json({error:'Une carte de la liste est absente du catalogue.'});return;}
   const commander=byId.get(input.commander_id)!;
-  const deckRows=db.prepare(`SELECT c.oracle_id,c.name,c.type_line,c.image,coalesce(json_extract(p.data,'$.oracle_text'),json_extract(p.data,'$.card_faces[0].oracle_text'),'') || char(10) || coalesce(json_extract(p.data,'$.card_faces[1].oracle_text'),'') AS oracle_text FROM cards c LEFT JOIN card_printings p ON p.id=(SELECT p2.id FROM card_printings p2 WHERE p2.oracle_id=c.oracle_id ORDER BY p2.released_at DESC,p2.id DESC LIMIT 1) WHERE c.oracle_id IN (${[...counts.keys()].map(()=>'?').join(',')})`).all(...counts.keys()) as SynergyCardData[];
+  const deckRows=db.prepare(`SELECT c.oracle_id,c.name,c.type_line,c.image,json_extract(p.data,'$.toughness') AS toughness,coalesce(json_extract(p.data,'$.oracle_text'),json_extract(p.data,'$.card_faces[0].oracle_text'),'') || char(10) || coalesce(json_extract(p.data,'$.card_faces[1].oracle_text'),'') AS oracle_text FROM cards c LEFT JOIN card_printings p ON p.id=(SELECT p2.id FROM card_printings p2 WHERE p2.oracle_id=c.oracle_id ORDER BY p2.released_at DESC,p2.id DESC LIMIT 1) WHERE c.oracle_id IN (${[...counts.keys()].map(()=>'?').join(',')})`).all(...counts.keys()) as SynergyCardData[];
   const commanderPrinting=db.prepare("SELECT json_extract(data,'$.color_identity') AS color_identity FROM card_printings WHERE oracle_id=? ORDER BY released_at DESC,id DESC LIMIT 1").get(input.commander_id) as {color_identity:string|null}|undefined;
   let identity:string[]=[];try{identity=commanderPrinting?.color_identity?JSON.parse(commanderPrinting.color_identity):[];}catch{}
-  const pool=db.prepare("SELECT c.oracle_id,c.name,c.type_line,c.image,coalesce(json_extract(p.data,'$.oracle_text'),json_extract(p.data,'$.card_faces[0].oracle_text'),'') || char(10) || coalesce(json_extract(p.data,'$.card_faces[1].oracle_text'),'') AS oracle_text,json_extract(p.data,'$.color_identity') AS color_identity,json_extract(p.data,'$.colors') AS colors,json_extract(p.data,'$.cmc') AS cmc,json_extract(p.data,'$.mana_cost') AS mana_cost FROM cards c LEFT JOIN card_printings p ON p.id=(SELECT p2.id FROM card_printings p2 WHERE p2.oracle_id=c.oracle_id ORDER BY p2.released_at DESC,p2.id DESC LIMIT 1) WHERE c.oracle_id NOT IN ("+[...counts.keys()].map(()=>'?').join(',')+")").all(...counts.keys()) as (SynergyCardData&{color_identity:string|null;colors:string|null;cmc:number|null;mana_cost:string|null})[];
+  const pool=db.prepare("SELECT c.oracle_id,c.name,c.type_line,c.image,json_extract(p.data,'$.toughness') AS toughness,coalesce(json_extract(p.data,'$.oracle_text'),json_extract(p.data,'$.card_faces[0].oracle_text'),'') || char(10) || coalesce(json_extract(p.data,'$.card_faces[1].oracle_text'),'') AS oracle_text,json_extract(p.data,'$.color_identity') AS color_identity,json_extract(p.data,'$.colors') AS colors,json_extract(p.data,'$.cmc') AS cmc,json_extract(p.data,'$.mana_cost') AS mana_cost FROM cards c LEFT JOIN card_printings p ON p.id=(SELECT p2.id FROM card_printings p2 WHERE p2.oracle_id=c.oracle_id ORDER BY p2.released_at DESC,p2.id DESC LIMIT 1) WHERE c.oracle_id NOT IN ("+[...counts.keys()].map(()=>'?').join(',')+")").all(...counts.keys()) as (SynergyCardData&{color_identity:string|null;colors:string|null;cmc:number|null;mana_cost:string|null})[];
   const legalPool=pool.filter(card=>{try{const colors=card.color_identity?JSON.parse(card.color_identity):[];return colors.every((color:string)=>identity.includes(color));}catch{return false;}});
   const poolById=new Map(pool.map(card=>[card.oracle_id,card]));
-  const synergies=rankSynergyCandidates(deckRows,legalPool,80);
+  const synergies=rankSynergyCandidates(deckRows,legalPool,80,input.commander_id);
   const combos=await commanderSuggestions({id:commander.oracle_id,name:commander.name},[...counts].filter(([id])=>id!==input.commander_id).map(([id,quantity])=>({id,name:byId.get(id)!.name,quantity})),counts.keys()).catch(()=>[]);
   const combined=new Map<string,any>(synergies.map(card=>[card.oracle_id,{...card,kind:'synergy',combo_count:0,combo_url:'',combo_evidence:[],score:card.synergy_score,source:'Scryfall + Commander Spellbook'}]));
   for(const card of combos){const prior=combined.get(card.oracle_id),metadata=poolById.get(card.oracle_id);if(prior){prior.kind='combo_and_synergy';prior.combo_count=card.combo_count;prior.combo_url=card.combo_url;prior.combo_evidence=card.combo_evidence;prior.source='Commander Spellbook + Scryfall';}else combined.set(card.oracle_id,{...metadata,...card,cmc:metadata?.cmc??null,mana_cost:metadata?.mana_cost??null,colors:metadata?.colors??null,color_identity:metadata?.color_identity??null,kind:'combo',synergy_score:0,synergy_links:[],synergy_source:'Commander Spellbook'});}

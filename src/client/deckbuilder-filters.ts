@@ -22,7 +22,7 @@ function normalizedColor(card:FilterCard):string[]|null{return colorArray(card.c
 function numberValue(value:string):number|null{if(!value.trim())return null;const number=Number(value);return Number.isFinite(number)?number:null;}
 export function activeDeckFilterCount(filters:DeckFilters,scope:FilterScope):number{
  const shared=['name','type','manaMin','manaMax','color'];
- const scoped=scope==='recommendations'?['synergyMin','synergyMax','kind']:scope==='selected'?['quantityMin','quantityMax','ownership','commander','legality']:['quantityMin','quantityMax'];
+ const scoped=scope==='recommendations'?['synergyMin','synergyMax','kind','ownership']:scope==='selected'?['quantityMin','quantityMax','ownership','commander','legality']:['quantityMin','quantityMax'];
  return [...shared,...scoped].filter(key=>filters[key as keyof DeckFilters].trim()!=='').length;
 }
 export function deckFilterError(filters:DeckFilters,scope:FilterScope):string{
@@ -49,6 +49,8 @@ export function matchesDeckFilters(card:FilterCard,filters:DeckFilters,scope:Fil
   if(filters.kind&&card.kind!==filters.kind)return false;
   if(scoreMin!==null&&(score===undefined||score<scoreMin))return false;
   if(scoreMax!==null&&(score===undefined||score>scoreMax))return false;
+  if(filters.ownership==='owned'&&(card.owned_quantity??0)<=0)return false;
+  if(filters.ownership==='friend'&&((card.owned_quantity??0)>0||(card.friend_owner_count??0)<=0))return false;
  }
  if(scope==='selected'){
   if(filters.ownership==='owned'&&(card.owned_quantity??0)<=0)return false;
