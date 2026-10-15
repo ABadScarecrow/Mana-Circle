@@ -46,6 +46,11 @@ export function openDatabase(path: string) {
   for(const row of select.all() as {oracle_id:string;fr_type_line:string|null}[])if(row.fr_type_line)insert.run(row.oracle_id,row.fr_type_line);
   db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run('card-type-language-v1',Date.now());
  });
+ if(!db.prepare('SELECT 1 FROM schema_migrations WHERE name=?').get('commander-statistics-v1'))transaction(db,()=>{
+  const columns=db.prepare('PRAGMA table_info(commander_card_stats)').all() as {name:string}[];
+  if(columns.length&&!columns.some(column=>column.name==='source_count'))db.exec('ALTER TABLE commander_card_stats ADD COLUMN source_count INTEGER NOT NULL DEFAULT 1');
+  db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run('commander-statistics-v1',Date.now());
+ });
  return db;
 }
 export function transaction<T>(db: DatabaseSync, fn:()=>T):T {

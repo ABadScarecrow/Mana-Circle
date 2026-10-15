@@ -15,7 +15,8 @@
     "test:browser": "playwright test",
     "check": "npm test && npm run test:browser && npm run build",
     "admin": "tsx src/server/admin.ts",
-    "import:scryfall": "tsx src/server/import-scryfall.ts"
+    "import:scryfall": "tsx src/server/import-scryfall.ts",
+    "commander-data": "tsx src/server/commander-data-cli.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

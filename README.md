@@ -2,7 +2,7 @@
 
 Un petit outil entre amis : decks, collection, wishlist et échanges. React + TypeScript, Express et SQLite, dans un seul dépôt. Pas de service de base de données à installer.
 
-Voir aussi la [documentation du deckbuilder](docs/DECKBUILDER.md) : vues, contrôles de densité, courbe de mana et suggestions de combos.
+Voir aussi la [documentation du deckbuilder](docs/DECKBUILDER.md) et le [pipeline de données Commander](docs/COMMANDER_DATA.md) : import local, provenance, statistiques, sources et exploitation.
 
 ## Site privé et hébergement EndeavourOS
 
