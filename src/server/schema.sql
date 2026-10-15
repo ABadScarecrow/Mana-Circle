@@ -66,3 +66,40 @@ CREATE TABLE IF NOT EXISTS game_players (
  PRIMARY KEY(room_id,user_id)
 );
 CREATE INDEX IF NOT EXISTS game_players_user ON game_players(user_id,status);
+
+-- Community deck research is kept separate from user-owned decks and accounts.
+CREATE TABLE IF NOT EXISTS commander_sources (
+ id TEXT PRIMARY KEY, access_mode TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+ terms_reviewed_at TEXT, notes TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS commander_decks (
+ id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES commander_sources(id) ON DELETE CASCADE,
+ source_deck_id TEXT NOT NULL, source_url TEXT, name TEXT NOT NULL, author TEXT,
+ format TEXT NOT NULL DEFAULT 'commander', color_identity TEXT NOT NULL DEFAULT '[]',
+ created_at_source TEXT, updated_at_source TEXT, retrieved_at TEXT NOT NULL,
+ content_hash TEXT NOT NULL, validation_status TEXT NOT NULL CHECK(validation_status IN ('valid','partial','rejected')),
+ error_json TEXT NOT NULL DEFAULT '[]', UNIQUE(source_id,source_deck_id)
+);
+CREATE INDEX IF NOT EXISTS commander_decks_commander ON commander_decks(source_id,validation_status);
+CREATE TABLE IF NOT EXISTS commander_deck_cards (
+ deck_id TEXT NOT NULL REFERENCES commander_decks(id) ON DELETE CASCADE,
+ oracle_id TEXT NOT NULL REFERENCES cards(oracle_id), section TEXT NOT NULL CHECK(section IN ('commander','mainboard','sideboard','maybeboard','other')),
+ quantity INTEGER NOT NULL CHECK(quantity BETWEEN 1 AND 9999),
+ PRIMARY KEY(deck_id,oracle_id,section)
+);
+CREATE INDEX IF NOT EXISTS commander_deck_cards_card ON commander_deck_cards(oracle_id,deck_id);
+CREATE TABLE IF NOT EXISTS commander_card_stats (
+ commander_id TEXT NOT NULL REFERENCES cards(oracle_id), card_id TEXT NOT NULL REFERENCES cards(oracle_id),
+ deck_count INTEGER NOT NULL, copy_count INTEGER NOT NULL, population INTEGER NOT NULL, source_count INTEGER NOT NULL DEFAULT 1,
+ inclusion_rate REAL NOT NULL, calculated_at TEXT NOT NULL, dataset_version TEXT NOT NULL,
+ PRIMARY KEY(commander_id,card_id)
+);
+CREATE INDEX IF NOT EXISTS commander_card_stats_rank ON commander_card_stats(commander_id,inclusion_rate DESC,deck_count DESC);
+CREATE TABLE IF NOT EXISTS commander_card_associations (
+ commander_id TEXT NOT NULL REFERENCES cards(oracle_id), seed_card_id TEXT NOT NULL REFERENCES cards(oracle_id),
+ card_id TEXT NOT NULL REFERENCES cards(oracle_id), cooccurrence INTEGER NOT NULL,
+ conditional_rate REAL NOT NULL, lift REAL NOT NULL, calculated_at TEXT NOT NULL, dataset_version TEXT NOT NULL,
+ PRIMARY KEY(commander_id,seed_card_id,card_id)
+);
+CREATE INDEX IF NOT EXISTS commander_associations_lookup ON commander_card_associations(commander_id,seed_card_id,conditional_rate DESC);
+CREATE TABLE IF NOT EXISTS commander_dataset_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL);
