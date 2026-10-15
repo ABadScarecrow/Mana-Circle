@@ -22,6 +22,18 @@ export function openDatabase(path: string) {
     DROP TABLE legacy_deck_cards;`);
   });
  }else db.exec(schema);
+ const gameRoomsSchema=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='game_rooms'").get() as {sql:string}|undefined;
+ if(gameRoomsSchema&&!gameRoomsSchema.sql.includes("'closed'")){
+  db.exec('PRAGMA foreign_keys=OFF');
+  try{transaction(db,()=>{
+   db.exec(`CREATE TABLE game_rooms_next (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, host_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    format TEXT NOT NULL CHECK(format IN ('casual','commander')), status TEXT NOT NULL DEFAULT 'lobby' CHECK(status IN ('lobby','playing','finished','closed')),
+    state_json TEXT, version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+   )`);
+   db.exec('INSERT INTO game_rooms_next SELECT id,name,host_id,format,status,state_json,version,created_at,updated_at FROM game_rooms; DROP TABLE game_rooms; ALTER TABLE game_rooms_next RENAME TO game_rooms;');
+  });}finally{db.exec('PRAGMA foreign_keys=ON');}
+ }
  const entryColumns=db.prepare('PRAGMA table_info(collection_entries)').all();
  if(!entryColumns.some(c=>c.name==='group_id'))db.exec('ALTER TABLE collection_entries ADD COLUMN group_id TEXT REFERENCES collection_groups(id) ON DELETE SET NULL');
  db.exec('CREATE INDEX IF NOT EXISTS collection_entries_group ON collection_entries(user_id,group_id,oracle_id)');

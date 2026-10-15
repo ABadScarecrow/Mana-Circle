@@ -1,12 +1,12 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {applyAction,canPay,createGame,type Card,type GameAction,type GameState,type GameStep} from '../src/server/game-engine';
+import {applyAction,canPay,createGame,stabilizeGame,type Card,type GameAction,type GameState,type GameStep} from '../src/server/game-engine';
 
 const card=(id:string,type_line:string,more:Partial<Card>={}):Card=>({id,oracle_id:`oracle-${id}`,name:id,type_line,...more});
 const twoPlayer=(libraries:Card[][]=[[],[]],options:{format?:'casual'|'commander';startingPlayer?:number}={})=>createGame({players:[{id:'a',name:'Alice',library:libraries[0]??[]},{id:'b',name:'Bob',library:libraries[1]??[]}],...options});
 const action=(type:GameAction['type'],playerId='a',rest:Record<string,unknown>={})=>({type,playerId,...rest}) as GameAction;
 function act(s:GameState,type:GameAction['type'],playerId='a',rest:Record<string,unknown>={}){return applyAction(s,action(type,playerId,rest));}
-function passRound(s:GameState){let next=act(s,'pass_priority',s.players[s.priority]!.id);if(next.passes===0)return next;return act(next,'pass_priority',next.players[next.priority]!.id);}
+function passRound(s:GameState){const step=s.step,stack=s.stack.length;for(let i=0;i<s.players.length*2+2;i++){s=act(s,'pass_priority',s.players[s.priority]!.id);if(s.winner||s.step!==step||s.stack.length<stack)return s;}throw new Error(`La priorité n'avance pas à ${step}.`);}
 function toStep(state:GameState,target:GameStep){let s=state;for(let i=0;i<40&&s.step!==target;i++)s=passRound(s);assert.equal(s.step,target,`Did not reach ${target}`);return s;}
 function player(s:GameState,id:string){return s.players.find(p=>p.id===id)!;}
 
@@ -18,13 +18,14 @@ test('createGame initializes valid games, deals seven, and does not mutate its i
  assert.deepEqual(input,before);assert.equal(s.players.length,2);assert.equal(s.active,1);assert.equal(s.first_player,'b');assert.equal(s.turn,1);assert.equal(s.step,'upkeep');assert.equal(s.priority,1);assert.equal(s.format,'commander');
  assert.equal(player(s,'a').life,40);assert.equal(player(s,'a').zones.hand.length,7);assert.equal(player(s,'a').zones.library.length,2);assert.equal(player(s,'b').zones.hand.length,0);assert.deepEqual(player(s,'a').zones.command,[commander]);
  player(s,'a').zones.hand[0]!.name='mutated copy';assert.equal(library[0]!.name,'Card 0');assert.equal(forest.name,'Forest');
- assert.throws(()=>createGame({players:[{id:'a',name:'A',library:[]}]}),/2 à 6 joueurs/);
- assert.throws(()=>createGame({players:Array.from({length:7},(_,i)=>({id:String(i),name:String(i),library:[]}))}),/2 à 6 joueurs/);
+ assert.throws(()=>createGame({players:[{id:'a',name:'A',library:[]}]}),/exactement deux joueurs/);
+ assert.throws(()=>createGame({players:Array.from({length:7},(_,i)=>({id:String(i),name:String(i),library:[]}))}),/exactement deux joueurs/);
  assert.throws(()=>createGame({players:[{id:'a',name:'A',library:[]},{id:'b',name:'B',library:[]}],startingPlayer:2}),/Joueur de départ invalide/);
+ assert.throws(()=>createGame({players:[{id:'a',name:'A',library:[]},{id:'b',name:'B',library:[]},{id:'c',name:'C',library:[]}]}),/exactement deux joueurs/);
  assert.throws(()=>createGame({players:[{id:'same',name:'A',library:[]},{id:'same',name:'B',library:[]}]}),/identifiant unique/);
 });
 
-test('priority rotates, resolves the stack last-in first-out, and spell cards reach correct zones',()=>{
+test('priority auto-passes unavailable players and resolves the stack when no response is legal',()=>{
  let s=twoPlayer([[card('Bear','Creature — Bear'),card('Bolt','Instant'),card('Other','Instant'),card('Island','Basic Land — Island')],[card('Response','Instant')]]);
  s=toStep(s,'main1');
  const bear=player(s,'a').zones.hand.find(c=>c.name==='Bear')!;
@@ -35,8 +36,8 @@ test('priority rotates, resolves the stack last-in first-out, and spell cards re
  const bolt=player(s,'a').zones.hand.find(c=>c.name==='Bolt')!,response=player(s,'b').zones.hand.find(c=>c.name==='Response')!;
  s=act(s,'cast_spell','a',{cardId:bolt.id});s=act(s,'cast_spell','b',{cardId:response.id});assert.deepEqual(s.stack.map(x=>x.card.name),['Bolt','Response']);
  s=passRound(s);assert.deepEqual(s.stack.map(x=>x.card.name),['Bolt']);assert.deepEqual(player(s,'b').zones.graveyard.map(c=>c.name),['Response']);
- s=passRound(s);assert.equal(s.stack.length,0);assert.deepEqual(player(s,'a').zones.graveyard.map(c=>c.name),['Bolt']);
- assert.deepEqual(s.log.filter(x=>x.type==='resolve').map(x=>x.card),[bear.id,response.id,bolt.id]);
+ const other=player(s,'a').zones.hand.find(c=>c.name==='Other')!;s=act(s,'cast_spell','a',{cardId:other.id});assert.equal(s.stack.length,0);assert.deepEqual(player(s,'a').zones.graveyard.map(c=>c.name),['Other','Bolt']);
+ assert.deepEqual(s.log.filter(x=>x.type==='resolve').map(x=>x.card),[bear.id,response.id,other.id,bolt.id]);
 });
 
 test('land play timing and once-per-turn limit are enforced',()=>{
@@ -49,16 +50,44 @@ test('land play timing and once-per-turn limit are enforced',()=>{
 });
 
 test('basic lands produce only their matching colors and mana costs enforce colored and generic requirements',()=>{
- let s=twoPlayer([[card('Forest','Basic Land — Forest'),card('Bear','Creature — Bear',{mana_cost:'{G}{2}'})],[]]);
+ let s=twoPlayer([[card('Forest','Basic Land — Forest'),card('Bear','Creature — Bear',{mana_cost:'{G}'})],[]]);
  const forest=player(s,'a').zones.hand.find(c=>c.name==='Forest')!;
  s=toStep(s,'main1');s=act(s,'play_land','a',{cardId:forest.id});
  assert.throws(()=>act(s,'tap_mana','a',{cardId:forest.id,color:'R'}),/ne produit pas/);
  s=act(s,'tap_mana','a',{cardId:forest.id,color:'G'});assert.equal(player(s,'a').mana.G,1);assert.equal(player(s,'a').zones.battlefield[0]!.tapped,true);
  assert.equal(canPay(player(s,'a').mana,'{G}'),true);assert.equal(canPay(player(s,'a').mana,'{G}{1}'),false);assert.equal(canPay(player(s,'a').mana,'{R}'),false);assert.equal(canPay(player(s,'a').mana,'{X}'),false);
- assert.throws(()=>act(s,'pay_mana','a',{cost:'{G}{2}'}),/Mana insuffisant/);
- s=act(s,'pay_mana','a',{cost:'{G}'});assert.equal(player(s,'a').mana.G,0);
- s=toStep(s,'main1');
- assert.throws(()=>act(s,'cast_spell','a',{cardId:player(s,'a').zones.hand.find(c=>c.name==='Bear')!.id}),/Mana insuffisant/);
+ const bear=player(s,'a').zones.hand.find(c=>c.name==='Bear')!;assert.equal(canPay(player(s,'a').mana,'{G}{2}'),false);
+ s=act(s,'cast_spell','a',{cardId:bear.id});assert.ok(player(s,'a').zones.battlefield.some(c=>c.name==='Bear'));
+});
+
+test('mana abilities keep priority open on the opponent turn and resolve without using the stack',()=>{
+ let s=twoPlayer();
+ const forest=card('Bob Forest','Basic Land — Forest');
+ player(s,'b').zones.battlefield.push(forest);
+ s=stabilizeGame(s);
+ assert.equal(s.step,'upkeep');assert.equal(s.players[s.priority]!.id,'b');
+ s=act(s,'tap_mana','b',{cardId:forest.id,color:'G'});
+ assert.equal(player(s,'b').mana.G,1);assert.equal(player(s,'b').zones.battlefield[0]!.tapped,true);
+ assert.equal(s.stack.length,0);assert.equal(s.step,'upkeep');
+
+ s=twoPlayer([[card('Free spell','Instant')],[]]);
+ const responseLand=card('Response Forest','Basic Land — Forest');
+ player(s,'b').zones.battlefield.push(responseLand);s.step='main1';
+ const spell=player(s,'a').zones.hand[0]!;
+ s=act(s,'cast_spell','a',{cardId:spell.id});
+ assert.equal(s.stack.length,1);assert.equal(s.players[s.priority]!.id,'b');
+ s=act(s,'tap_mana','b',{cardId:responseLand.id,color:'G'});
+ assert.equal(s.stack.length,1);assert.equal(player(s,'b').mana.G,1);
+});
+
+test('a land played this turn can be tapped immediately and floating mana empties when a step ends',()=>{
+ let s=twoPlayer([[card('Fresh Forest','Basic Land — Forest')],[]]);
+ s=toStep(s,'main1');const forest=player(s,'a').zones.hand[0]!;
+ s=act(s,'play_land','a',{cardId:forest.id});
+ s=act(s,'tap_mana','a',{cardId:forest.id,color:'G'});
+ assert.equal(player(s,'a').mana.G,1);
+ s=act(s,'pass_priority','a');
+ assert.equal(player(s,'a').mana.G,0);assert.notEqual(s.step,'main1');
 });
 
 test('attackers, blockers and combat damage tap creatures and assign lethal damage',()=>{
@@ -69,17 +98,20 @@ test('attackers, blockers and combat damage tap creatures and assign lethal dama
  const a=player(s,'a').zones.battlefield[0]!;a.summoning_sick=false;
  s=toStep(s,'declare_attackers');s=act(s,'declare_attackers','a',{attacks:[{attacker:a.id,defender:'b'}]});assert.equal(player(s,'a').zones.battlefield[0]!.tapped,true);
  assert.throws(()=>act(s,'declare_attackers','a',{attacks:[]}),/mauvais moment/);
- s=passRound(s);assert.equal(s.step,'declare_blockers');assert.throws(()=>act(s,'declare_blockers','b',{blocks:[{blocker:victim.id,attacker:a.id}]}),/mauvais moment/);
- s=act(s,'pass_priority','a');s=act(s,'declare_blockers','b',{blocks:[{blocker:victim.id,attacker:a.id}]});assert.equal(s.step,'combat_damage');
- assert.equal(s.combatDamageDone,true);assert.deepEqual(player(s,'b').zones.graveyard.map(c=>c.name),['Victim']);assert.deepEqual(player(s,'a').zones.graveyard.map(c=>c.name),[]);assert.equal(player(s,'b').life,20);
+ assert.throws(()=>act(s,'declare_blockers','a',{blocks:[{blocker:victim.id,attacker:a.id}]}),/mauvais moment/);
+ s=act(s,'declare_blockers','b',{blocks:[{blocker:victim.id,attacker:a.id}]});
+ assert.deepEqual(player(s,'b').zones.graveyard.map(c=>c.name),['Victim']);assert.deepEqual(player(s,'a').zones.graveyard.map(c=>c.name),[]);assert.equal(player(s,'b').life,20);
 });
 
-test('turn progression draws for the non-first player, then untaps and draws for the next active player',()=>{
- let s=twoPlayer([[...Array.from({length:10},(_,i)=>card(`A${i}`,'Sorcery'))],[...Array.from({length:10},(_,i)=>card(`B${i}`,'Sorcery'))]],{startingPlayer:0});
- s=toStep(s,'main1');assert.equal(player(s,'a').zones.hand.length,7);assert.equal(player(s,'b').zones.hand.length,7);
+test('turn progression automatically skips unavailable windows, draws for the second player and untaps',()=>{
+ let s=twoPlayer([[...Array.from({length:80},(_,i)=>card(`A${i}`,'Sorcery',{mana_cost:'{9}'}))],[...Array.from({length:7},(_,i)=>card(`B${i}`,'Sorcery',{mana_cost:'{9}'})),card('Drawn Forest','Basic Land — Forest'),...Array.from({length:72},(_,i)=>card(`Later B${i}`,'Sorcery',{mana_cost:'{9}'}))]],{startingPlayer:0});
  const land=card('Tapped Forest','Basic Land — Forest',{tapped:true});s.players[1]!.zones.battlefield.push(land);
- s=toStep(s,'upkeep');assert.equal(s.active,1);assert.equal(s.turn,2);assert.equal(player(s,'b').zones.battlefield[0]!.tapped,false);
- s=toStep(s,'draw');assert.equal(player(s,'b').zones.hand.length,8);
+ s=toStep(s,'main1');assert.equal(s.step,'main1');assert.equal(s.active,1);assert.equal(s.turn,2);assert.equal(player(s,'a').zones.hand.length,7);assert.equal(player(s,'b').zones.battlefield[0]!.tapped,false);assert.equal(player(s,'b').zones.hand.length,8);
+});
+
+test('a dead opening upkeep auto-passes to the first main phase without drawing for the starting player',()=>{
+ let s=twoPlayer([[card('Forest','Basic Land — Forest'),...Array.from({length:20},(_,i)=>card(`A${i}`,'Sorcery',{mana_cost:'{9}'}))],[...Array.from({length:30},(_,i)=>card(`B${i}`,'Sorcery',{mana_cost:'{9}'}))]],{startingPlayer:0});
+ s=act(s,'pass_priority','a');assert.equal(s.turn,1);assert.equal(s.step,'main1');assert.equal(s.active,0);assert.equal(player(s,'a').zones.hand.length,7);assert.equal(player(s,'b').zones.hand.length,7);
 });
 
 test('life, poison, commander damage, and concession determine wins and draws',()=>{

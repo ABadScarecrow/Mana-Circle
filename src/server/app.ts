@@ -444,7 +444,10 @@ export function createApp(db:DatabaseSync,resolveCard?:ReturnType<typeof resolve
   if(error instanceof z.ZodError){res.status(400).json({error:'Données invalides.',details:error.issues});return;}
   if(error?.type==='entity.too.large'){res.status(413).json({error:'Requête trop volumineuse : le serveur accepte les corps JSON jusqu’à 64 Mo.'});return;}
   if(error?.type==='entity.parse.failed'){res.status(400).json({error:'Le texte envoyé est illisible. Réessaie.'});return;}
-  console.error('Erreur interne du serveur.');res.status(500).json({error:'La requête a échoué. Réessayez.'});
+  // Keep the response generic, but retain the original exception in server logs
+  // so production-only database/schema failures can be diagnosed.
+  console.error('Erreur interne du serveur :',error);
+  res.status(500).json({error:'La requête a échoué. Réessayez.'});
  });
  // Gate every document before the production static server or Vite middleware.
  app.use((req,res,next)=>{

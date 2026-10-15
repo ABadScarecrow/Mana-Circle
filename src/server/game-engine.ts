@@ -20,7 +20,7 @@ export type Block = { blocker: string; attacker: string };
 export type GameState = {
   players: Player[]; active: number; first_player: string; turn: number; step: GameStep; priority: number;
   passes: number; stack: StackEntry[]; winner: string | null; format: 'casual'|'commander';
-  attacks: Attack[]; blocks: Block[]; attackersDeclared: boolean; blockersDeclared: string[]; combatDamageDone: boolean; log: GameEvent[];
+  attacks: Attack[]; blocks: Block[]; attackersDeclared: boolean; blockersDeclared: string[]; blockersPriorityStarted:boolean; combatDamageDone: boolean; log: GameEvent[];
 };
 export type GameEvent = { type: string; message: string; player?: string; card?: string };
 export type GameAction =
@@ -62,6 +62,63 @@ const isType = (c:Card,type:string) => new RegExp(`\\b${type}\\b`,'i').test(c.ty
 const eligible=(p:Player)=>!p.conceded&&p.life>0&&p.poison<10&&!Object.values(p.commander_damage).some(n=>n>=21);
 function priority(s:GameState,from:number){for(let n=1;n<=s.players.length;n++){const i=(from+n)%s.players.length;if(eligible(s.players[i]!))return i;}return from;}
 function repairPriority(s:GameState){if(!s.winner&&!eligible(s.players[s.priority]!)){s.priority=priority(s,s.priority);s.passes=0;}}
+function canPayWithUntappedLands(p:Player,cost:string):boolean{
+ if(canPay(p.mana,cost))return true;
+ let requirements:{colored:Partial<Record<Color,number>>;generic:number};try{requirements=manaCost(cost);}catch{return false;}
+ const sources=p.zones.battlefield.filter(c=>!c.tapped&&isType(c,'Land')).map(landColors);
+ const manaTotal=colors.reduce((sum,color)=>sum+p.mana[color],p.mana.generic)+sources.length;
+ const symbols=colors.flatMap(color=>Array.from({length:Math.max(0,(requirements.colored[color]??0)-p.mana[color])},()=>color));
+ if(manaTotal<colors.reduce((sum,color)=>sum+(requirements.colored[color]??0),requirements.generic)||symbols.length>sources.length)return false;
+ const sourceForSymbol=Array(sources.length).fill(-1) as number[];
+ const assign=(symbol:number,seen:boolean[]):boolean=>{for(let source=0;source<sources.length;source++){if(seen[source]||!sources[source]!.includes(symbols[symbol]!))continue;seen[source]=true;if(sourceForSymbol[source]===-1||assign(sourceForSymbol[source]!,seen)){sourceForSymbol[source]=symbol;return true;}}return false;};
+ return symbols.every((_color,index)=>assign(index,Array(sources.length).fill(false)));
+}
+function canPlayerAct(s:GameState,index:number):boolean{
+ const p=s.players[index]!;if(!eligible(p))return false;
+ // A player who has floated mana must be allowed to decide whether to keep
+ // acting or pass; auto-passing here would otherwise erase it at the step end.
+ if(colors.some(color=>p.mana[color]>0)||p.mana.generic>0)return true;
+ // Mana abilities can be activated whenever their controller has priority,
+ // including outside their turn and while a spell is on the stack. Keep that
+ // priority window open so auto-pass never removes this legal choice.
+ if(p.zones.battlefield.some(c=>!c.tapped&&isType(c,'Land')&&landColors(c).length>0))return true;
+ if(index===s.active&&['main1','main2'].includes(s.step)&&s.stack.length===0&&p.lands_played<1&&p.zones.hand.some(c=>isType(c,'Land')))return true;
+ return p.zones.hand.some(c=>{
+  if(isType(c,'Land'))return false;
+  const instant=isType(c,'Instant')||c.keywords?.some(k=>k.toLowerCase()==='flash');
+  const timing=instant||index===s.active&&['main1','main2'].includes(s.step)&&s.stack.length===0;
+  return timing&&canPayWithUntappedLands(p,c.mana_cost??'');
+ });
+}
+function legalAttackers(s:GameState){return s.players[s.active]!.zones.battlefield.filter(c=>isType(c,'Creature')&&!c.tapped&&!c.summoning_sick&&!/defender/i.test((c.keywords??[]).join(' ')));}
+function legalBlockers(s:GameState,defender:string){const p=player(s,defender);return p.zones.battlefield.some(c=>isType(c,'Creature')&&!c.tapped);}
+function stabilize(s:GameState){
+ // Automatic passes only skip priority seats with no legal game action. Explicit
+ // choices (playing a land, attacking, blocking, or casting) remain with players.
+ for(let guard=0;guard<40000&&!s.winner;guard++){
+  if(s.step==='declare_attackers'&&!s.attackersDeclared){
+   if(legalAttackers(s).length){s.priority=s.active;s.passes=0;return;}
+   s.attacks=[];s.attackersDeclared=true;event(s,'attackers',`${activePlayer(s).name} ne déclare aucun attaquant.`,activePlayer(s).id);s.priority=s.active;s.passes=0;continue;
+  }
+  if(s.step==='declare_blockers'){
+   const defenders=[...new Set(s.attacks.map(a=>a.defender).filter(id=>eligible(player(s,id))))];
+   const nextDefender=Array.from({length:s.players.length},(_,offset)=>s.players[(s.active+1+offset)%s.players.length]!).find(p=>defenders.includes(p.id)&&!s.blockersDeclared.includes(p.id));
+   if(nextDefender){
+    if(legalBlockers(s,nextDefender.id)){s.priority=s.players.indexOf(nextDefender);s.passes=0;return;}
+    s.blockersDeclared.push(nextDefender.id);event(s,'blockers',`${nextDefender.name} ne déclare aucun bloqueur.`,nextDefender.id);continue;
+   }
+   // Block declarations are simultaneous turn-based choices. Then a fresh
+   // priority round lets players cast instants before combat damage.
+   if(!s.blockersPriorityStarted){s.priority=s.active;s.passes=0;s.blockersPriorityStarted=true;}
+  }
+  if(canPlayerAct(s,s.priority))return;
+  s.passes++;
+  if(s.passes>=living(s).length){
+   s.passes=0;
+   if(s.stack.length){resolveTop(s);s.priority=eligible(s.players[s.active]!)?s.active:priority(s,s.active);}else nextStep(s);
+  }else s.priority=priority(s,s.priority);
+ }
+}
 function findBattlefield(s:GameState,cardId:string){for(const owner of s.players){const index=owner.zones.battlefield.findIndex(c=>c.id===cardId);if(index>=0)return {owner,index,card:owner.zones.battlefield[index]!};}throw new Error('Créature de combat introuvable.');}
 function resolveCombatDamage(s:GameState){
  for(const attack of s.attacks){
@@ -89,7 +146,7 @@ function nextStep(s:GameState){
     const active=activePlayer(s);for(const c of active.zones.battlefield){c.tapped=false;c.damage=0;c.summoning_sick=false;}active.lands_played=0;for(const c of active.zones.battlefield)if(isType(c,'Creature'))c.summoning_sick=false;
     s.step='upkeep';event(s,'untap',`${active.name} dégage ses permanents.`,active.id);
   }
-  if(s.step==='begin_combat'){s.attacks=[];s.blocks=[];s.attackersDeclared=false;s.blockersDeclared=[];s.combatDamageDone=false;}
+  if(s.step==='begin_combat'){s.attacks=[];s.blocks=[];s.attackersDeclared=false;s.blockersDeclared=[];s.blockersPriorityStarted=false;s.combatDamageDone=false;}
   if(s.step==='combat_damage')resolveCombatDamage(s);
   s.priority=eligible(s.players[s.active]!)?s.active:priority(s,s.active);s.passes=0;
   const p=activePlayer(s);
@@ -98,28 +155,29 @@ function nextStep(s:GameState){
 }
 function resolveTop(s:GameState){const entry=s.stack.pop();if(!entry)return;const p=player(s,entry.controller);const card=entry.card;if(isType(card,'Creature')||isType(card,'Artifact')||isType(card,'Enchantment')||isType(card,'Planeswalker')||isType(card,'Battle')){card.summoning_sick=isType(card,'Creature');p.zones.battlefield.push(card);}else p.zones.graveyard.push(card);event(s,'resolve',`${card.name} se résout sans effet de carte spécifique.`,p.id,card.id);}
 export function createGame(input:{players:Array<{id:string;name:string;library:Card[];commander?:Card[]}>;format?:'casual'|'commander';startingPlayer?:number}):GameState {
-  assert(input.players.length>=2&&input.players.length<=6,'Une partie requiert de 2 à 6 joueurs.');
+  assert(input.players.length===2,'Une partie requiert exactement deux joueurs.');
   assert(new Set(input.players.map(x=>x.id)).size===input.players.length,'Chaque joueur doit avoir un identifiant unique.');
   const players:Player[]=input.players.map(x=>({id:x.id,name:x.name,life:input.format==='commander'?40:20,poison:0,commander_damage:{},zones:{library:x.library.map(c=>({...c})),hand:[],battlefield:[],graveyard:[],exile:[],command:(x.commander??[]).map(c=>({...c})),stack:[]},mana:emptyMana(),lands_played:0,conceded:false}));
   const active=input.startingPlayer??0;assert(Number.isInteger(active)&&active>=0&&active<players.length,'Joueur de départ invalide.');
-  const s:GameState={players,active,first_player:players[active]!.id,turn:1,step:'upkeep',priority:active,passes:0,stack:[],winner:null,format:input.format??'casual',attacks:[],blocks:[],attackersDeclared:false,blockersDeclared:[],combatDamageDone:false,log:[]};
+  const s:GameState={players,active,first_player:players[active]!.id,turn:1,step:'upkeep',priority:active,passes:0,stack:[],winner:null,format:input.format??'casual',attacks:[],blocks:[],attackersDeclared:false,blockersDeclared:[],blockersPriorityStarted:false,combatDamageDone:false,log:[]};
   for(const p of players)for(let i=0;i<7;i++){const c=p.zones.library.shift();if(c)p.zones.hand.push(c);}event(s,'start',`${players[active]!.name} commence.`,players[active]!.id);return s;
 }
+export function stabilizeGame(state:GameState):GameState{const next=structuredClone(state);stabilize(next);return next;}
 export function applyAction(state:GameState,action:GameAction):GameState {
-  assert(!state.winner,'La partie est terminée.');const s=structuredClone(state);s.attackersDeclared??=false;s.blockersDeclared??=[];s.combatDamageDone??=false;const p=player(s,action.playerId);
+  assert(!state.winner,'La partie est terminée.');const s=structuredClone(state);s.attackersDeclared??=false;s.blockersDeclared??=[];s.blockersPriorityStarted??=false;s.combatDamageDone??=false;const p=player(s,action.playerId);
   assert(!p.conceded,'Ce joueur a concédé la partie.');
   switch(action.type){
-    case 'pass_priority': {assert(s.players[s.priority]!.id===p.id,'Ce joueur n’a pas la priorité.');s.passes++;if(s.passes>=living(s).length){if(s.stack.length)resolveTop(s);else nextStep(s);s.priority=eligible(s.players[s.active]!)?s.active:priority(s,s.active);s.passes=0;}else s.priority=priority(s,s.priority);break;}
+    case 'pass_priority': {assert(s.players[s.priority]!.id===p.id,'Ce joueur n’a pas la priorité.');if(s.step==='declare_attackers'&&!s.attackersDeclared&&s.active===s.players.indexOf(p)){s.attacks=[];s.attackersDeclared=true;event(s,'attackers',`${p.name} ne déclare aucun attaquant.`,p.id);s.passes=0;break;}if(s.step==='declare_blockers'&&!s.blockersDeclared.includes(p.id)&&s.attacks.some(a=>a.defender===p.id)){s.blockersDeclared.push(p.id);event(s,'blockers',`${p.name} ne déclare aucun bloqueur.`,p.id);s.passes=0;break;}s.passes++;if(s.passes>=living(s).length){if(s.stack.length)resolveTop(s);else nextStep(s);s.priority=eligible(s.players[s.active]!)?s.active:priority(s,s.active);s.passes=0;}else s.priority=priority(s,s.priority);break;}
     case 'cast_spell': {assert(s.players[s.priority]!.id===p.id,'Il faut avoir la priorité pour lancer un sort.');const found=locate(p,action.cardId,'hand'),c=found.card;assert(!isType(c,'Land'),'Un terrain ne peut pas être lancé comme un sort.');const instant=isType(c,'Instant')||Boolean(c.keywords?.some(k=>k.toLowerCase()==='flash'));assert(instant||s.active===s.players.indexOf(p)&&['main1','main2'].includes(s.step)&&s.stack.length===0,'Ce sort ne peut être lancé à ce moment.');pay(p.mana,c.mana_cost??'');p.zones.hand.splice(found.index,1);s.stack.push({id:`stack-${s.turn}-${s.log.length}`,card:c,controller:p.id,targets:action.targets??[],kind:'spell'});s.priority=priority(s,s.players.indexOf(p));s.passes=0;event(s,'cast',`${p.name} lance ${c.name}.`,p.id,c.id);break;}
     case 'play_land': {assert(s.active===s.players.indexOf(p)&&s.players[s.priority]!.id===p.id&&['main1','main2'].includes(s.step)&&s.stack.length===0,'Un terrain ne peut être joué que pendant une phase principale sans sort en pile.');assert(p.lands_played<1,'Le terrain autorisé pour ce tour a déjà été joué.');const f=locate(p,action.cardId,'hand');assert(isType(f.card,'Land'),'Cette carte n’est pas un terrain.');p.zones.hand.splice(f.index,1);p.zones.battlefield.push(f.card);p.lands_played++;event(s,'land',`${p.name} joue ${f.card.name}.`,p.id,f.card.id);break;}
     case 'tap_mana': {assert(s.players[s.priority]!.id===p.id,'Il faut avoir la priorité pour produire du mana.');const f=locate(p,action.cardId,'battlefield');assert(!f.card.tapped&&isType(f.card,'Land'),'Cette source de mana n’est pas disponible.');assert(landColors(f.card).includes(action.color),`Ce terrain ne produit pas de mana ${action.color}.`);f.card.tapped=true;p.mana[action.color]++;event(s,'mana',`${p.name} ajoute {${action.color}} à sa réserve.`,p.id,f.card.id);break;}
     case 'pay_mana': pay(p.mana,action.cost);event(s,'mana_paid',`${p.name} paie ${action.cost}.`,p.id);break;
     case 'declare_attackers': {assert(s.active===s.players.indexOf(p)&&s.players[s.priority]!.id===p.id&&s.step==='declare_attackers'&&s.stack.length===0&&!s.attackersDeclared,'Déclaration des attaquants au mauvais moment.');const seen=new Set<string>();for(const a of action.attacks){const f=locate(p,a.attacker,'battlefield');assert(isType(f.card,'Creature')&&!f.card.tapped&&!f.card.summoning_sick&&!/defender/i.test((f.card.keywords??[]).join(' ')),'Créature illégale comme attaquante.');assert(a.defender!==p.id&&s.players.some(x=>x.id===a.defender&&eligible(x)),'Défenseur invalide.');assert(!seen.has(a.attacker),'Attaquant déclaré deux fois.');seen.add(a.attacker);if(!/vigilance/i.test((f.card.keywords??[]).join(' ')))f.card.tapped=true;}s.attacks=action.attacks.map(x=>({...x}));s.attackersDeclared=true;s.priority=s.active;s.passes=0;event(s,'attackers',`${p.name} déclare ${s.attacks.length} attaquant(s).`,p.id);break;}
-    case 'declare_blockers': {assert(s.step==='declare_blockers'&&s.players[s.priority]!.id===p.id&&s.players[s.active]!.id!==p.id&&s.stack.length===0&&!s.blockersDeclared.includes(p.id)&&s.attacks.some(a=>a.defender===p.id),'Déclaration des bloqueurs au mauvais moment.');const seen=new Set(s.blocks.map(b=>b.blocker));for(const b of action.blocks){const f=locate(p,b.blocker,'battlefield');assert(isType(f.card,'Creature')&&!f.card.tapped,'Bloqueur illégal.');assert(s.attacks.some(a=>a.attacker===b.attacker&&a.defender===p.id),'Cet attaquant ne vous attaque pas.');assert(!seen.has(b.blocker),'Bloqueur déclaré deux fois.');seen.add(b.blocker);}s.blocks.push(...action.blocks.map(x=>({...x})));s.blockersDeclared.push(p.id);event(s,'blockers',`${p.name} déclare ${action.blocks.length} bloqueur(s).`,p.id);s.passes++;if(s.passes>=living(s).length){nextStep(s);s.priority=eligible(s.players[s.active]!)?s.active:priority(s,s.active);s.passes=0;}else s.priority=priority(s,s.priority);break;}
+    case 'declare_blockers': {assert(s.step==='declare_blockers'&&s.players[s.priority]!.id===p.id&&s.players[s.active]!.id!==p.id&&s.stack.length===0&&!s.blockersDeclared.includes(p.id)&&s.attacks.some(a=>a.defender===p.id),'Déclaration des bloqueurs au mauvais moment.');const seen=new Set(s.blocks.map(b=>b.blocker));for(const b of action.blocks){const f=locate(p,b.blocker,'battlefield');assert(isType(f.card,'Creature')&&!f.card.tapped,'Bloqueur illégal.');assert(s.attacks.some(a=>a.attacker===b.attacker&&a.defender===p.id),'Cet attaquant ne vous attaque pas.');assert(!seen.has(b.blocker),'Bloqueur déclaré deux fois.');seen.add(b.blocker);}s.blocks.push(...action.blocks.map(x=>({...x})));s.blockersDeclared.push(p.id);event(s,'blockers',`${p.name} déclare ${action.blocks.length} bloqueur(s).`,p.id);s.priority=s.active;s.passes=0;break;}
     case 'concede': {const index=s.players.indexOf(p);p.conceded=true;event(s,'concede',`${p.name} concède.`,p.id);checkWinner(s);if(!s.winner){if(s.active===index){s.active=priority(s,index);s.turn++;s.step='upkeep';const next=activePlayer(s);for(const c of next.zones.battlefield){c.tapped=false;c.damage=0;c.summoning_sick=false;}next.lands_played=0;for(const seat of s.players)seat.mana=emptyMana();event(s,'untap',`${next.name} commence son tour après la concession.`,next.id);}s.priority=eligible(s.players[s.active]!)?s.active:priority(s,s.active);s.passes=0;}break;}
     case 'adjust_life': p.life+=action.amount;checkWinner(s);repairPriority(s);event(s,'life',`${p.name} : ${p.life} points de vie.`,p.id);break;
     case 'add_poison': p.poison=Math.max(0,p.poison+action.amount);checkWinner(s);repairPriority(s);event(s,'poison',`${p.name} a ${p.poison} marqueurs poison.`,p.id);break;
     case 'add_commander_damage': assert(action.sourcePlayerId!==p.id&&s.players.some(x=>x.id===action.sourcePlayerId)&&Number.isInteger(action.amount)&&action.amount>0,'Source ou quantité de blessures de commandant invalide.');p.commander_damage[action.sourcePlayerId]=(p.commander_damage[action.sourcePlayerId]??0)+action.amount;checkWinner(s);repairPriority(s);event(s,'commander_damage',`${p.name} subit des blessures de commandant.`,p.id);break;
   }
-  return s;
+  stabilize(s);return s;
 }

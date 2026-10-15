@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS site_access (
 );
 CREATE TABLE IF NOT EXISTS game_rooms (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, host_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
- format TEXT NOT NULL CHECK(format IN ('casual','commander')), status TEXT NOT NULL DEFAULT 'lobby' CHECK(status IN ('lobby','playing','finished')),
+ format TEXT NOT NULL CHECK(format IN ('casual','commander')), status TEXT NOT NULL DEFAULT 'lobby' CHECK(status IN ('lobby','playing','finished','closed')),
  state_json TEXT, version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS game_players (

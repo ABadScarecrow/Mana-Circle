@@ -55,6 +55,44 @@ test('game lobby requires auth, CSRF, accepted friends, and owned saved decks; i
  }finally{f.db.close();}
 });
 
+test('game creation rejects malformed fields without leaving partial rooms or invitations',async()=>{
+ const f=await fixture();try{
+  const hostDeck=await f.savedDeck(f.alice.id);await f.friendship(f.alice,f.bobby);
+  const invalid=[
+   {name:'   ',deckId:hostDeck,friendIds:[f.bobby.id]},
+   {name:'x'.repeat(61),deckId:hostDeck,friendIds:[f.bobby.id]},
+   {name:'valid',deckId:'not-a-uuid',friendIds:[f.bobby.id]},
+   {name:'valid',deckId:hostDeck,friendIds:[]},
+   {name:'valid',deckId:hostDeck,friendIds:[f.bobby.id,f.carol.id]},
+   {name:'valid',deckId:hostDeck,friendIds:[f.bobby.id,f.bobby.id]},
+   {name:'valid',deckId:hostDeck,friendIds:[f.bobby.id],format:'draft'},
+  ];
+  for(const payload of invalid)await post(f.alice.agent,'/api/games',payload).expect(400);
+  assert.equal((f.db.prepare('SELECT count(*) AS n FROM game_rooms').get() as any).n,0);
+  assert.equal((f.db.prepare('SELECT count(*) AS n FROM game_players').get() as any).n,0);
+  const created=await post(f.alice.agent,'/api/games',{name:'  soirée  ',deckId:hostDeck,friendIds:[f.bobby.id]}).expect(201);
+  assert.equal(created.body.name,'soirée');
+  assert.equal((f.db.prepare('SELECT count(*) AS n FROM game_rooms').get() as any).n,1);
+  assert.equal((f.db.prepare('SELECT count(*) AS n FROM game_players').get() as any).n,2);
+ }finally{f.db.close();}
+});
+
+test('game list safely loads persisted game states whose player zones are absent',async()=>{
+ const f=await fixture();try{
+  const hostDeck=await f.savedDeck(f.alice.id,'Host deck',false),friendDeck=await f.savedDeck(f.bobby.id,'Friend deck',false);await f.friendship(f.alice,f.bobby);
+  const room=(await post(f.alice.agent,'/api/games',{name:'Legacy state',deckId:hostDeck,friendIds:[f.bobby.id]}).expect(201)).body;
+  await post(f.bobby.agent,`/api/games/${room.id}/accept`,{deckId:friendDeck}).expect(200);
+  await post(f.alice.agent,`/api/games/${room.id}/actions`,{action:'start'}).expect(200);
+  const saved=JSON.parse((f.db.prepare('SELECT state_json FROM game_rooms WHERE id=?').get(room.id) as any).state_json);
+  delete saved.players[0].zones;delete saved.players[1].zones;
+  f.db.prepare('UPDATE game_rooms SET state_json=? WHERE id=?').run(JSON.stringify(saved),room.id);
+  const listed=await f.alice.agent.get('/api/games').expect(200);
+  const recovered=listed.body.find((entry:any)=>entry.id===room.id);
+  assert.ok(recovered);const own=recovered.engine.players.find((player:any)=>player.id===f.alice.id);assert.equal(own.zones.hand_count,0);assert.deepEqual(own.zones.hand,[]);
+  await f.alice.agent.get(`/api/games/${room.id}`).expect(200);
+ }finally{f.db.close();}
+});
+
 test('starting snapshots registered decks, deals private hands, and excludes sideboards',async()=>{
  const f=await fixture();try{
   const hostDeck=await f.savedDeck(f.alice.id,'Commander',true),friendDeck=await f.savedDeck(f.bobby.id,'Friend deck',false);
@@ -70,6 +108,29 @@ test('starting snapshots registered decks, deals private hands, and excludes sid
   assert.equal(alice.body.players.find((p:any)=>p.user_id===f.bobby.id).hand,undefined);
   await post(f.alice.agent,'/api/games/'+room.id+'/actions',{action:'start'}).expect(409);
   await post(f.bobby.agent,'/api/games/'+room.id+'/actions',{action:'start'}).expect(409);
+ }finally{f.db.close();}
+});
+
+test('only the host can close a playing game and closure preserves read-only history',async()=>{
+ const f=await fixture();try{
+  const hostDeck=await f.savedDeck(f.alice.id),friendDeck=await f.savedDeck(f.bobby.id);await f.friendship(f.alice,f.bobby);
+  const room=(await post(f.alice.agent,'/api/games',{name:'Close me',deckId:hostDeck,friendIds:[f.bobby.id]}).expect(201)).body;
+  await post(f.alice.agent,`/api/games/${room.id}/close`,{}).expect(409);
+  await post(f.bobby.agent,`/api/games/${room.id}/accept`,{deckId:friendDeck}).expect(200);
+  await post(f.alice.agent,`/api/games/${room.id}/actions`,{action:'start'}).expect(200);
+  await post(f.bobby.agent,`/api/games/${room.id}/close`,{}).expect(403);
+  await post(f.carol.agent,`/api/games/${room.id}/close`,{}).expect(403);
+  const before=(await f.alice.agent.get(`/api/games/${room.id}`).expect(200)).body;
+  const closed=(await post(f.alice.agent,`/api/games/${room.id}/close`,{}).expect(200)).body;
+  assert.equal(closed.status,'closed');assert.equal(closed.version,before.version+1);
+  assert.ok(closed.engine.log.some((entry:any)=>entry.type==='close'));
+  for(const agent of [f.alice.agent,f.bobby.agent]){
+   assert.equal((await agent.get(`/api/games/${room.id}`).expect(200)).body.status,'closed');
+   assert.ok((await agent.get('/api/games').expect(200)).body.some((entry:any)=>entry.id===room.id&&entry.status==='closed'));
+  }
+  await post(f.alice.agent,`/api/games/${room.id}/actions`,{action:'pass_priority'}).expect(409);
+  await post(f.alice.agent,`/api/games/${room.id}/close`,{}).expect(409);
+  await post(f.alice.agent,`/api/games/${randomUUID()}/close`,{}).expect(404);
  }finally{f.db.close();}
 });
 
@@ -123,10 +184,12 @@ test('game commands enforce zones and turns, update combat counters and isolate 
 
 test('parallel invitation acceptance is single-use and account reset removes hosted games',async()=>{
  const f=await fixture();try{
-  const hostDeck=await f.savedDeck(f.alice.id),friendDeck=await f.savedDeck(f.bobby.id);await f.friendship(f.alice,f.bobby);
+  const hostDeck=await f.savedDeck(f.alice.id),friendDeck=await f.savedDeck(f.bobby.id),extraDeck=await f.savedDeck(f.carol.id);await f.friendship(f.alice,f.bobby);
   const room=(await post(f.alice.agent,'/api/games',{name:'Reset me',deckId:hostDeck,friendIds:[f.bobby.id]}).expect(201)).body;
   const attempts=await Promise.all([post(f.bobby.agent,'/api/games/'+room.id+'/accept',{deckId:friendDeck}),post(f.bobby.agent,'/api/games/'+room.id+'/accept',{deckId:friendDeck})]);
   assert.deepEqual(attempts.map((r:any)=>r.status).sort(),[200,409]);
+  f.db.prepare("INSERT INTO game_players(room_id,user_id,status) VALUES (?,?,'invited')").run(room.id,f.carol.id);
+  await post(f.carol.agent,'/api/games/'+room.id+'/accept',{deckId:extraDeck}).expect(409);
   await post(f.alice.agent,'/api/account/reset',{password,confirmation:'RESET'}).expect(200);
   await f.bobby.agent.get('/api/games/'+room.id).expect(404);
   assert.equal((await f.alice.agent.get('/api/games').expect(200)).body.length,0);

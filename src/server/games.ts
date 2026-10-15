@@ -3,7 +3,7 @@ import {randomInt,randomUUID} from 'node:crypto';
 import type {DatabaseSync} from 'node:sqlite';
 import {z} from 'zod';
 import {transaction} from './db';
-import {applyAction,createGame,type Card,type GameAction,type GameState} from './game-engine';
+import {applyAction,createGame,stabilizeGame,type Card,type GameAction,type GameState} from './game-engine';
 
 const id=z.string().uuid();
 const phaseLabel:Record<GameState['step'],string>={untap:'Dégagement',upkeep:'Entretien',draw:'Pioche',main1:'Première phase principale',begin_combat:'Début du combat',declare_attackers:'Déclaration des attaquants',declare_blockers:'Déclaration des bloqueurs',combat_damage:'Blessures de combat',end_combat:'Fin du combat',main2:'Deuxième phase principale',end:'Fin',cleanup:'Nettoyage'};
@@ -19,7 +19,20 @@ const actionSchema=z.discriminatedUnion('action',[
  z.object({action:z.literal('add_commander_damage'),sourcePlayerId:id,amount:z.number().int().min(0).max(99)}),
 ]);
 type ActionInput=z.infer<typeof actionSchema>;
-function parseState(raw:string|null):GameState|null{if(!raw)return null;try{return JSON.parse(raw) as GameState;}catch{return null;}}
+function parseState(raw:string|null):GameState|null{
+ if(!raw)return null;
+ try{
+  const value=JSON.parse(raw) as Partial<GameState>;
+  if(!value||!Array.isArray(value.players))return null;
+  const zoneNames=['library','hand','battlefield','graveyard','exile','command','stack'] as const;
+  const players=value.players.map((entry:any)=>{
+   const zones=entry&&typeof entry.zones==='object'&&entry.zones?entry.zones:{};
+   const normalizedZones=Object.fromEntries(zoneNames.map(zone=>[zone,Array.isArray(zones[zone])?zones[zone]:[]]));
+   return {...entry,zones:normalizedZones,commander_damage:entry?.commander_damage??{},mana:entry?.mana??{W:0,U:0,B:0,R:0,G:0,generic:0},life:entry?.life??20,poison:entry?.poison??0,lands_played:entry?.lands_played??0,conceded:entry?.conceded??false};
+  });
+  return {...value,players,stack:Array.isArray(value.stack)?value.stack:[],attacks:Array.isArray(value.attacks)?value.attacks:[],blocks:Array.isArray(value.blocks)?value.blocks:[],log:Array.isArray(value.log)?value.log:[],blockersDeclared:Array.isArray(value.blockersDeclared)?value.blockersDeclared:[],attackersDeclared:value.attackersDeclared??false,combatDamageDone:value.combatDamageDone??false} as GameState;
+ }catch{return null;}
+}
 function member(db:DatabaseSync,roomId:string,userId:string){return db.prepare('SELECT status FROM game_players WHERE room_id=? AND user_id=?').get(roomId,userId) as {status:string}|undefined;}
 function publicEngine(state:GameState,userId:string){return {...state,players:state.players.map(p=>({id:p.id,name:p.name,life:p.life,poison:p.poison,commander_damage:p.commander_damage,mana:p.mana,lands_played:p.lands_played,conceded:p.conceded,zones:{hand:p.id===userId?p.zones.hand:undefined,hand_count:p.zones.hand.length,library:[],library_count:p.zones.library.length,battlefield:p.zones.battlefield,graveyard:p.zones.graveyard,exile:p.zones.exile,command:p.zones.command,stack:[]}}))};}
 function roomInfo(db:DatabaseSync,room:any,userId:string,state:GameState|null){
@@ -27,7 +40,7 @@ function roomInfo(db:DatabaseSync,room:any,userId:string,state:GameState|null){
   const seat=state?.players.find(s=>s.id===p.user_id);
   return {...p,life:seat?.life??(room.format==='commander'?40:20),library_count:seat?.zones.library.length??0,hand_count:seat?.zones.hand.length??0,hand:p.user_id===userId?seat?.zones.hand??[]:undefined,battlefield:seat?.zones.battlefield??[],graveyard:seat?.zones.graveyard??[],exile:seat?.zones.exile??[],command:seat?.zones.command??[],poison:seat?.poison??0,commander_damage:seat?.commander_damage??{},mana:seat?.mana??null,conceded:seat?.conceded??false};
  });
- return {id:room.id,name:room.name,format:room.format,status:state?.winner?'finished':room.status,host_id:room.host_id,version:room.version,created_at:room.created_at,updated_at:room.updated_at,players,...(state?{active_player_id:state.players[state.active]?.id??null,priority_user_id:state.players[state.priority]?.id??null,turn:state.turn,step:state.step,phase:phaseLabel[state.step],stack:state.stack,attacks:state.attacks,blocks:state.blocks,winner:state.winner,engine:publicEngine(state,userId),log:state.log.map(entry=>({text:entry.message,at:undefined,...entry}))}:{} )};
+ return {id:room.id,name:room.name,format:room.format,status:room.status==='closed'?'closed':state?.winner?'finished':room.status,host_id:room.host_id,version:room.version,created_at:room.created_at,updated_at:room.updated_at,players,...(state?{active_player_id:state.players[state.active]?.id??null,priority_user_id:state.players[state.priority]?.id??null,turn:state.turn,step:state.step,phase:phaseLabel[state.step],stack:state.stack,attacks:state.attacks,blocks:state.blocks,winner:state.winner,engine:publicEngine(state,userId),log:state.log.map(entry=>({text:entry.message,at:undefined,...entry}))}:{} )};
 }
 function fail(res:express.Response,status:number,error:string){res.status(status).json({error});}
 function toEngineAction(input:Exclude<ActionInput,{action:'start'}>,playerId:string):GameAction{
@@ -41,7 +54,7 @@ export function gameRoutes(app:express.Express,db:DatabaseSync){
   res.json(rooms.map(room=>roomInfo(db,room,res.locals.user.id,parseState(room.state_json))));
  });
  app.post('/api/games',(req,res)=>{
-  const input=z.object({name:z.string().trim().min(1).max(60),deckId:id,friendIds:z.array(id).min(1).max(5),format:z.enum(['casual','commander']).default('casual')}).parse(req.body);
+  const input=z.object({name:z.string().trim().min(1).max(60),deckId:id,friendIds:z.array(id).length(1),format:z.enum(['casual','commander']).default('casual')}).parse(req.body);
   const userId=res.locals.user.id as string;
   if(new Set(input.friendIds).size!==input.friendIds.length||input.friendIds.includes(userId)){fail(res,400,'Choisis des amis différents de toi.');return;}
   if(!db.prepare('SELECT id FROM decks WHERE id=? AND user_id=?').get(input.deckId,userId)){fail(res,400,'Choisis un deck déjà enregistré dans ton compte.');return;}
@@ -59,8 +72,23 @@ export function gameRoutes(app:express.Express,db:DatabaseSync){
  app.post('/api/games/:id/accept',(req,res)=>{
   const {deckId}=z.object({deckId:id}).parse(req.body),userId=res.locals.user.id as string;
   if(!db.prepare('SELECT id FROM decks WHERE id=? AND user_id=?').get(deckId,userId)){fail(res,400,'Choisis un deck déjà enregistré dans ton compte.');return;}
-  const changed=db.prepare("UPDATE game_players SET status='joined',deck_id=? WHERE room_id=? AND user_id=? AND status='invited' AND EXISTS(SELECT 1 FROM game_rooms WHERE id=? AND status='lobby')").run(deckId,req.params.id,userId,req.params.id);
+  const changed=db.prepare("UPDATE game_players SET status='joined',deck_id=? WHERE room_id=? AND user_id=? AND status='invited' AND EXISTS(SELECT 1 FROM game_rooms WHERE id=? AND status='lobby') AND (SELECT COUNT(*) FROM game_players WHERE room_id=? AND status='joined')<2").run(deckId,req.params.id,userId,req.params.id,req.params.id);
   if(!changed.changes){fail(res,409,'Cette invitation n’est plus disponible.');return;}
+  const room=db.prepare('SELECT * FROM game_rooms WHERE id=?').get(req.params.id) as any;res.json(roomInfo(db,room,userId,parseState(room.state_json)));
+ });
+ app.post('/api/games/:id/close',(req,res)=>{
+  const userId=res.locals.user.id as string;
+  try{transaction(db,()=>{
+   const room=db.prepare('SELECT * FROM game_rooms WHERE id=?').get(req.params.id) as any;
+   if(!room)throw Object.assign(new Error('Partie introuvable.'),{status:404});
+   const participant=member(db,room.id,userId);
+   if(!participant||participant.status!=='joined'||room.host_id!==userId)throw Object.assign(new Error('Seul l’hôte peut fermer cette partie.'),{status:403});
+   if(room.status!=='playing')throw Object.assign(new Error('Seule une partie en cours peut être fermée.'),{status:409});
+   const state=parseState(room.state_json);
+   if(state)state.log.push({type:'close',message:`${state.players.find(p=>p.id===userId)?.name??'L’hôte'} a fermé la partie.`,player:userId});
+   const result=db.prepare("UPDATE game_rooms SET status='closed',state_json=COALESCE(?,state_json),version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='playing'").run(state?JSON.stringify(state):null,room.id);
+   if(!result.changes)throw Object.assign(new Error('Cette partie n’est plus en cours.'),{status:409});
+  });}catch(e){const error=e as Error&{status?:number};fail(res,error.status??400,error.message);return;}
   const room=db.prepare('SELECT * FROM game_rooms WHERE id=?').get(req.params.id) as any;res.json(roomInfo(db,room,userId,parseState(room.state_json)));
  });
  app.post('/api/games/:id/actions',(req,res)=>{
@@ -71,7 +99,7 @@ export function gameRoutes(app:express.Express,db:DatabaseSync){
    if(input.action==='start'){
     if(room.host_id!==userId||room.status!=='lobby')throw Object.assign(new Error('Seul l’hôte peut démarrer une partie en attente.'),{status:409});
     const rows=db.prepare("SELECT gp.user_id,u.username,gp.deck_id,d.name AS deck_name FROM game_players gp JOIN users u ON u.id=gp.user_id JOIN decks d ON d.id=gp.deck_id AND d.user_id=gp.user_id WHERE gp.room_id=? AND gp.status='joined'").all(roomId) as any[];
-    if(rows.length<2)throw Object.assign(new Error('Il faut au moins deux joueurs ayant choisi un deck.'),{status:400});
+    if(rows.length!==2)throw Object.assign(new Error('Il faut exactement deux joueurs ayant choisi un deck.'),{status:400});
     const decks=rows.map(row=>{
      const lines=db.prepare(`SELECT dc.oracle_id,c.name,c.type_line,c.image,dc.quantity,dc.section,
       json_extract(p.data,'$.mana_cost') AS mana_cost,json_extract(p.data,'$.oracle_text') AS oracle_text,json_extract(p.data,'$.power') AS power,json_extract(p.data,'$.toughness') AS toughness,json_extract(p.data,'$.keywords') AS keywords
@@ -82,7 +110,7 @@ export function gameRoutes(app:express.Express,db:DatabaseSync){
      for(let i=library.length-1;i>0;i--){const j=randomInt(i+1);[library[i],library[j]]=[library[j]!,library[i]!];}
      return {id:row.user_id,name:row.username,library,commander};
     });
-    const engine=createGame({players:decks,format:room.format,startingPlayer:randomInt(decks.length)});
+    const engine=stabilizeGame(createGame({players:decks,format:room.format,startingPlayer:randomInt(decks.length)}));
     db.prepare("UPDATE game_rooms SET status='playing',state_json=?,version=version+1,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(JSON.stringify(engine),roomId);return;
    }
    if(room.status!=='playing')throw Object.assign(new Error('La partie n’est pas en cours.'),{status:409});
