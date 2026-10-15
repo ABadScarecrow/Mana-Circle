@@ -55,14 +55,3 @@ CREATE TABLE IF NOT EXISTS invitations (
 CREATE TABLE IF NOT EXISTS site_access (
  user_id TEXT PRIMARY KEY REFERENCES users(id), allowed INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS game_rooms (
- id TEXT PRIMARY KEY, name TEXT NOT NULL, host_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
- format TEXT NOT NULL CHECK(format IN ('casual','commander')), status TEXT NOT NULL DEFAULT 'lobby' CHECK(status IN ('lobby','playing','finished','closed')),
- state_json TEXT, version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS game_players (
- room_id TEXT NOT NULL REFERENCES game_rooms(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
- deck_id TEXT REFERENCES decks(id) ON DELETE SET NULL, status TEXT NOT NULL CHECK(status IN ('invited','joined','declined','left')),
- PRIMARY KEY(room_id,user_id)
-);
-CREATE INDEX IF NOT EXISTS game_players_user ON game_players(user_id,status);
